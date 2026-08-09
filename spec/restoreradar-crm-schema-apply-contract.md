@@ -95,15 +95,24 @@ The projection contains no IP address, user agent, or raw homeowner narrative.
 Only the Contact-to-RR-Lead-Assignment relation is created. Opportunity and
 Business references remain scalar IDs on the assignment record.
 
-Existing TEST contacts and opportunities must have exactly the expected
+Existing TEST contacts and opportunities must have exactly the expected tag or
 nonempty custom-field IDs and values. Empty API placeholders are allowed, but
-any unexpected nonempty custom value collides. Assignment properties follow
-the same rule. A matching TEST Business collides if either its top level or
-properties contain email/phone, a prohibited projection value, or an unexpected
-nonempty `rr_` projection property. Business discovery uses bounded 100-record
-pages and halts on repeated pages or record IDs.
+any unexpected controlled value collides; `false` and `0` are values, not empty.
+Assignment properties follow the same rule, so a stale sent timestamp or any
+other unexpected value halts. A matching TEST Business collides if either its
+top level or properties contain email/phone, or if its properties contain any
+unexpected nonempty value. Business discovery uses bounded 100-record requests,
+advances by the accumulated returned count, requires an explicit empty page,
+and halts on missing/repeated record IDs or repeated pages.
 
 V2 field readback is exact only when the server supplies a field ID and the
 field is under the resolved object namespace and intended RR folder ID. A
 same-name/key field in another folder is an incompatible collision, never an
 idempotent match.
+
+Pipelines, legacy fields, custom objects, associations, V2 folders, and V2
+fields are never considered exact without nonempty server IDs. After apply,
+the receipt replaces planned-create actions with the final all-existing
+readback plan. The stateful verification contract expects exactly 75 additive
+creates from an empty RestoreRadar schema; the custom object is first under the
+agency credential and every later create uses the location credential.

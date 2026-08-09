@@ -485,7 +485,11 @@ function findPipeline(pipelines, expected) {
     (pipeline) => String(pipeline?.name || '').toLowerCase() === expected.name.toLowerCase()
   );
   if (!matches.length) return { state: 'missing' };
-  if (matches.length !== 1 || !sameStringArray(stageNames(matches[0]), expected.stages)) {
+  if (
+    matches.length !== 1 ||
+    !matches[0]?.id ||
+    !sameStringArray(stageNames(matches[0]), expected.stages)
+  ) {
     return { state: 'collision', reason: `Pipeline ${expected.name} exists with incompatible stages` };
   }
   return { state: 'exact', value: matches[0] };
@@ -494,7 +498,11 @@ function findPipeline(pipelines, expected) {
 function findLegacyField(fields, model, name) {
   const matches = fields.filter((field) => field?.model === model && field?.name === name);
   if (!matches.length) return { state: 'missing' };
-  if (matches.length !== 1 || String(matches[0]?.dataType).toUpperCase() !== 'TEXT') {
+  if (
+    matches.length !== 1 ||
+    !matches[0]?.id ||
+    String(matches[0]?.dataType).toUpperCase() !== 'TEXT'
+  ) {
     return { state: 'collision', reason: `${model} field ${name} is incompatible` };
   }
   return { state: 'exact', value: matches[0] };
@@ -508,7 +516,7 @@ function findObject(objects, expected) {
   );
   if (!matches.length) return { state: 'missing' };
   const object = matches[0];
-  const exact = matches.length === 1 &&
+  const exact = matches.length === 1 && Boolean(object?.id) &&
     object.key === expected.key &&
     object.labels?.singular === expected.labels.singular &&
     object.labels?.plural === expected.labels.plural &&
@@ -559,7 +567,7 @@ function findAssociation(associations, expected) {
   );
   if (!matches.length) return { state: 'missing' };
   const association = matches[0];
-  const exact = matches.length === 1 &&
+  const exact = matches.length === 1 && Boolean(association?.id) &&
     association.key === expected.key &&
     association.firstObjectLabel === expected.firstObjectLabel &&
     association.firstObjectKey === expected.firstObjectKey &&
@@ -1338,11 +1346,13 @@ function customFieldValuesMatch(actualFields, expectedFields) {
 
 function exactTestContactReadback(contact, expected) {
   const tags = Array.isArray(contact?.tags) ? contact.tags : [];
+  const expectedTags = [...new Set(expected.tags)].sort();
+  const actualTags = [...new Set(tags)].sort();
   return contact?.name === expected.name &&
     contact?.dnd === true &&
     !contact?.email &&
     !contact?.phone &&
-    expected.tags.every((tag) => tags.includes(tag)) &&
+    sameStringArray(actualTags, expectedTags) &&
     customFieldValuesMatch(contact?.customFields, expected.customFields);
 }
 
@@ -1380,7 +1390,7 @@ async function readBusinesses(client, manifest, receipt) {
   const seenPages = new Set();
   for (let page = 0; page < maxPages; page += 1) {
     const payload = await client.request('GET', '/businesses/', {
-      query: { locationId: manifest.identity.locationId, limit, skip: page * limit }
+      query: { locationId: manifest.identity.locationId, limit, skip: all.length }
     });
     const businesses = requireArray(
       payload,
@@ -1404,7 +1414,7 @@ async function readBusinesses(client, manifest, receipt) {
       seenIds.add(business.id);
       all.push(business);
     }
-    if (businesses.length < limit) return all;
+    if (businesses.length === 0) return all;
   }
   throw new GuardError('BUSINESS_PAGINATION_LIMIT', 'Business discovery exceeded the bounded page limit');
 }
@@ -1446,7 +1456,7 @@ function safeBusinessReadback(record, expected, manifest) {
       }
       if (prohibited.has(normalized)) return false;
       const projectedKey = String(key).split('.').pop();
-      if (projectedKey.startsWith('rr_') && !expectedProjectedKeys.has(projectedKey)) return false;
+      if (container === properties && !expectedProjectedKeys.has(projectedKey)) return false;
     }
   }
   return true;
@@ -1889,6 +1899,9 @@ async function runSchemaTool({
     ) {
       throw new GuardError('FINAL_SCHEMA_NOT_EXACT', 'Post-create readback did not match the exact manifest');
     }
+    receipt.actions = finalPlan.actions;
+    receipt.collisions = finalPlan.collisions;
+    receipt.blockers = finalPlan.blockers;
     receipt.testVerification.recordsRead = true;
     await applyTestRecords(
       locationClient,

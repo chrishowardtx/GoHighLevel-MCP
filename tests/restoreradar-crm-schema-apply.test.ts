@@ -222,19 +222,37 @@ function completeFixture() {
 
 function completeRouter(call: FetchCall, overrides: {
   wrongBusinessFolder?: boolean;
+  wrongBusinessObjectKey?: boolean;
+  missingId?:
+    | 'pipeline'
+    | 'legacy-field'
+    | 'custom-object'
+    | 'association'
+    | 'v2-folder'
+    | 'v2-field';
   unsafeRecord?:
     | 'contact'
+    | 'contact-extra-tag'
+    | 'contact-false'
     | 'opportunity'
+    | 'opportunity-zero'
     | 'assignment'
+    | 'assignment-sent'
+    | 'assignment-false'
     | 'business-top-channel'
     | 'business-property-channel'
     | 'business-extra'
-    | 'business-prohibited';
+    | 'business-prohibited'
+    | 'business-false';
 } = {}) {
   const fixture = completeFixture();
   if (overrides.wrongBusinessFolder) {
     const field = fixture.businessFields.find((entry: any) => entry.name.startsWith('RR |'));
     field.parentId = 'wrong_folder';
+  }
+  if (overrides.wrongBusinessObjectKey) {
+    const field = fixture.businessFields.find((entry: any) => entry.name.startsWith('RR |'));
+    field.objectKey = 'wrong.business';
   }
   const { manifest } = fixture;
   const pathname = call.url.pathname;
@@ -291,10 +309,14 @@ function completeRouter(call: FetchCall, overrides: {
     });
   }
   if (call.method === 'GET' && pathname === '/opportunities/pipelines') {
-    return jsonResponse({ pipelines: fixture.pipelines });
+    const pipelines = fixture.pipelines.map((pipeline: any) => ({ ...pipeline }));
+    if (overrides.missingId === 'pipeline') delete pipelines[0].id;
+    return jsonResponse({ pipelines });
   }
   if (call.method === 'GET' && pathname.endsWith('/customFields')) {
-    return jsonResponse({ customFields: fixture.legacyFields });
+    const customFields = fixture.legacyFields.map((field: any) => ({ ...field }));
+    if (overrides.missingId === 'legacy-field') delete customFields[0].id;
+    return jsonResponse({ customFields });
   }
   if (call.method === 'GET' && pathname === '/objects/') {
     return jsonResponse({
@@ -302,7 +324,9 @@ function completeRouter(call: FetchCall, overrides: {
         { key: 'contact', standard: true },
         { key: 'opportunity', standard: true },
         { key: 'business', standard: true },
-        fixture.object
+        overrides.missingId === 'custom-object'
+          ? (() => { const object = { ...fixture.object }; delete object.id; return object; })()
+          : fixture.object
       ]
     });
   }
@@ -310,9 +334,16 @@ function completeRouter(call: FetchCall, overrides: {
     return jsonResponse({ object: fixture.object, fields: [fixture.primaryField] });
   }
   if (call.method === 'GET' && pathname === '/custom-fields/object-key/business') {
+    const fields = fixture.businessFields.map((field: any) => ({ ...field }));
+    const folders = [fixture.builtInBusinessFolder, { ...fixture.businessFolder }];
+    if (overrides.missingId === 'v2-folder') delete folders[1].id;
+    if (overrides.missingId === 'v2-field') {
+      const field = fields.find((entry: any) => entry.name.startsWith('RR |'));
+      delete field.id;
+    }
     return jsonResponse({
-      fields: fixture.businessFields,
-      folders: [fixture.builtInBusinessFolder, fixture.businessFolder]
+      fields,
+      folders
     });
   }
   if (
@@ -322,7 +353,9 @@ function completeRouter(call: FetchCall, overrides: {
     return jsonResponse({ fields: fixture.customFields, folders: [fixture.customFolder] });
   }
   if (call.method === 'GET' && pathname === '/associations/') {
-    return jsonResponse({ associations: [fixture.association] });
+    const association = { ...fixture.association };
+    if (overrides.missingId === 'association') delete association.id;
+    return jsonResponse({ associations: [association] });
   }
   if (call.method === 'POST' && pathname === '/contacts/search') {
     const query = call.body.query;
@@ -343,6 +376,10 @@ function completeRouter(call: FetchCall, overrides: {
         { id: 'unexpected_contact_field', fieldValue: 'UNEXPECTED_NONEMPTY' }
       ];
     }
+    if (overrides.unsafeRecord === 'contact-extra-tag') contact.tags.push('unexpected-tag');
+    if (overrides.unsafeRecord === 'contact-false') {
+      contact.customFields.push({ id: 'unexpected_contact_false', fieldValue: false });
+    }
     return jsonResponse({ contact });
   }
   if (call.method === 'GET' && pathname === '/contacts/contact_provider') {
@@ -358,7 +395,11 @@ function completeRouter(call: FetchCall, overrides: {
     });
   }
   if (call.method === 'GET' && pathname === '/businesses/') {
-    return jsonResponse({ businesses: [{ id: 'business_test', name: ids.businessName }] });
+    return jsonResponse({
+      businesses: call.url.searchParams.get('skip') === '0'
+        ? [{ id: 'business_test', name: ids.businessName }]
+        : []
+    });
   }
   if (call.method === 'GET' && pathname === '/objects/business/records/business_test') {
     const record: any = {
@@ -374,6 +415,9 @@ function completeRouter(call: FetchCall, overrides: {
     }
     if (overrides.unsafeRecord === 'business-prohibited') {
       record.properties.userAgent = 'UNEXPECTED_NONEMPTY';
+    }
+    if (overrides.unsafeRecord === 'business-false') {
+      record.properties.unexpected_false = false;
     }
     return jsonResponse({ record });
   }
@@ -396,6 +440,9 @@ function completeRouter(call: FetchCall, overrides: {
         ...opportunity.customFields,
         { id: 'unexpected_opportunity_field', fieldValue: 'UNEXPECTED_NONEMPTY' }
       ];
+    }
+    if (overrides.unsafeRecord === 'opportunity-zero') {
+      opportunity.customFields.push({ id: 'unexpected_opportunity_zero', fieldValue: 0 });
     }
     return jsonResponse({
       opportunity
@@ -423,6 +470,12 @@ function completeRouter(call: FetchCall, overrides: {
     };
     if (overrides.unsafeRecord === 'assignment') {
       properties.rr_unexpected_projection = 'UNEXPECTED_NONEMPTY';
+    }
+    if (overrides.unsafeRecord === 'assignment-sent') {
+      properties.rr_sent_at_utc = '2026-08-09T12:35:00.000Z';
+    }
+    if (overrides.unsafeRecord === 'assignment-false') {
+      properties.unexpected_false = false;
     }
     return jsonResponse({
       records: [{
@@ -462,11 +515,23 @@ function statefulMissingSchemaServer(objectReadDelay = 0) {
     businesses: [],
     opportunities: [],
     assignments: [],
-    relations: []
+    relations: [],
+    writeLog: []
   };
 
   const router = (call: FetchCall) => {
     const pathname = call.url.pathname;
+    if (
+      call.method === 'POST' &&
+      pathname !== '/contacts/search' &&
+      !pathname.endsWith('/records/search')
+    ) {
+      state.writeLog.push({
+        path: pathname,
+        authorization: call.headers.Authorization,
+        body: call.body
+      });
+    }
     if (call.method === 'GET' && pathname === `/companies/${manifest.identity.companyId}`) {
       return jsonResponse({ company: { id: manifest.identity.companyId } });
     }
@@ -584,10 +649,12 @@ function statefulMissingSchemaServer(objectReadDelay = 0) {
     }
     if (call.method === 'GET' && pathname === '/businesses/') {
       return jsonResponse({
-        businesses: state.businesses.map((business: any) => ({
-          id: business.id,
-          name: business.properties.name
-        }))
+        businesses: call.url.searchParams.get('skip') === '0'
+          ? state.businesses.map((business: any) => ({
+            id: business.id,
+            name: business.properties.name
+          }))
+          : []
       });
     }
     if (call.method === 'POST' && pathname === '/objects/business/records') {
@@ -807,14 +874,53 @@ describe('RestoreRadar guarded CRM schema apply tool', () => {
     expect(calls.every((call) => call.method === 'GET')).toBe(true);
   });
 
+  test('treats a V2 field under the wrong object namespace as a collision', async () => {
+    const { calls, fetchImpl } = mockFetch((call) =>
+      completeRouter(call, { wrongBusinessObjectKey: true })
+    );
+    const result = await runSchemaTool({
+      argv: requiredArgs(),
+      fetchImpl,
+      env: credentialEnv(),
+      now: () => NOW
+    });
+    expect(result.receipt.haltReason.code).toBe('SCHEMA_PLAN_HALTED');
+    expect(calls.every((call) => call.method === 'GET')).toBe(true);
+  });
+
+  test.each([
+    'pipeline',
+    'legacy-field',
+    'custom-object',
+    'association',
+    'v2-folder',
+    'v2-field'
+  ])('rejects an otherwise exact %s resource without a server ID', async (missingId: any) => {
+    const { calls, fetchImpl } = mockFetch((call) => completeRouter(call, { missingId }));
+    const result = await runSchemaTool({
+      argv: requiredArgs(),
+      fetchImpl,
+      env: credentialEnv(),
+      now: () => NOW
+    });
+    expect(result.receipt.haltReason.code).toBe('SCHEMA_PLAN_HALTED');
+    expect(calls.every((call) => call.method === 'GET')).toBe(true);
+  });
+
   test.each([
     'contact',
+    'contact-extra-tag',
+    'contact-false',
     'opportunity',
+    'opportunity-zero',
     'assignment',
+    'assignment-sent',
+    'assignment-false',
     'business-top-channel',
     'business-property-channel',
     'business-extra',
-    'business-prohibited'
+    'business-prohibited',
+    'business-false'
   ])('rejects unsafe nonempty values on an existing TEST %s record', async (unsafeRecord: any) => {
     const { calls, fetchImpl } = mockFetch((call) => completeRouter(call, { unsafeRecord }));
     const result = await runSchemaTool({
@@ -1011,7 +1117,7 @@ describe('RestoreRadar guarded CRM schema apply tool', () => {
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
-  test('paginates Business discovery until a short page', async () => {
+  test('finds a target Business on page two and requests an explicit empty page', async () => {
     const manifest = loadManifest();
     const receipt = createReceipt(manifest, { apply: false }, NOW.toISOString());
     const firstPage = Array.from({ length: 100 }, (_, index) => ({
@@ -1021,7 +1127,11 @@ describe('RestoreRadar guarded CRM schema apply tool', () => {
     const { calls, fetchImpl } = mockFetch((call) => {
       const skip = Number(call.url.searchParams.get('skip'));
       return jsonResponse({
-        businesses: skip === 0 ? firstPage : [{ id: 'business_100', name: 'Business 100' }]
+        businesses: skip === 0
+          ? firstPage
+          : skip === 100
+            ? [{ id: 'business_100', name: 'RR TEST target on page two' }]
+            : []
       });
     });
     const client = new HighLevelClient({
@@ -1034,7 +1144,8 @@ describe('RestoreRadar guarded CRM schema apply tool', () => {
       role: 'location'
     });
     await expect(readBusinesses(client, manifest, receipt)).resolves.toHaveLength(101);
-    expect(calls.map((call) => call.url.searchParams.get('skip'))).toEqual(['0', '100']);
+    expect(calls.map((call) => call.url.searchParams.get('skip')))
+      .toEqual(['0', '100', '101']);
   });
 
   test('halts Business pagination when the API repeats a full page', async () => {
@@ -1124,6 +1235,30 @@ describe('RestoreRadar guarded CRM schema apply tool', () => {
     expect(result.receipt.haltReason.code).toBe('MALFORMED_OBJECT_CREATE_RESPONSE');
   });
 
+  test('object create accepted but permanently unverified makes one POST then read-only retries', async () => {
+    const server = statefulMissingSchemaServer(99);
+    const { calls, fetchImpl } = mockFetch(server.router);
+    const result = await runSchemaTool({
+      argv: requiredArgs(['--apply', '--test-suffix', TEST_SUFFIX]),
+      fetchImpl,
+      env: credentialEnv(),
+      now: () => NOW
+    });
+    expect(result.receipt.haltReason.code).toBe('CREATE_ACCEPTED_READBACK_PENDING');
+    expect(server.state.writeLog).toHaveLength(1);
+    expect(server.state.writeLog[0].path).toBe('/objects/');
+    const objectPostIndex = calls.findIndex((call) =>
+      call.method === 'POST' && call.url.pathname === '/objects/'
+    );
+    expect(calls.slice(objectPostIndex + 1).every((call) => call.method === 'GET')).toBe(true);
+    expect(calls.filter((call) =>
+      call.method === 'GET' && call.url.pathname === `/objects/${server.manifest.customObject.key}`
+    )).toHaveLength(3);
+    expect(result.receipt.completed).toEqual([
+      expect.objectContaining({ resource: 'customObject', status: 'created' })
+    ]);
+  });
+
   test('creates a complete missing schema and TEST graph, then replays with zero writes', async () => {
     const server = statefulMissingSchemaServer(2);
     const first = mockFetch(server.router);
@@ -1131,7 +1266,7 @@ describe('RestoreRadar guarded CRM schema apply tool', () => {
       argv: requiredArgs(['--apply', '--test-suffix', TEST_SUFFIX]),
       fetchImpl: first.fetchImpl,
       env: credentialEnv(),
-      now: () => NOW
+      now: () => new Date('2040-01-02T03:04:05.000Z')
     });
     expect(firstResult.receipt.verdict).toBe('APPLIED');
     expect(firstResult.exitCode).toBe(0);
@@ -1140,8 +1275,14 @@ describe('RestoreRadar guarded CRM schema apply tool', () => {
       call.url.pathname !== '/contacts/search' &&
       !call.url.pathname.endsWith('/records/search')
     );
-    expect(firstMutationPosts.length).toBeGreaterThan(0);
+    expect(firstMutationPosts).toHaveLength(75);
+    expect(server.state.writeLog).toHaveLength(75);
     expect(firstMutationPosts[0].url.pathname).toBe('/objects/');
+    expect(server.state.writeLog[0].authorization).toBe(`Bearer ${AGENCY_TOKEN}`);
+    expect(server.state.writeLog.slice(1).every((write: any) =>
+      write.authorization === `Bearer ${TOKEN}`
+    )).toBe(true);
+    expect(firstResult.receipt.actions.every((action: any) => action.status === 'exists')).toBe(true);
     expect(server.state.pipelines).toHaveLength(2);
     expect(server.state.legacyFields).toHaveLength(
       server.manifest.legacyFields.contact.length +
@@ -1155,6 +1296,31 @@ describe('RestoreRadar guarded CRM schema apply tool', () => {
     expect(server.state.opportunities).toHaveLength(2);
     expect(server.state.assignments).toHaveLength(1);
     expect(server.state.relations).toHaveLength(1);
+    const ids = testIds(TEST_SUFFIX);
+    const homeowner = server.state.contacts.find((contact: any) => contact.name === ids.homeownerName);
+    const business = server.state.businesses[0];
+    const homeownerOpportunity = server.state.opportunities.find((opportunity: any) =>
+      opportunity.name === ids.homeownerOpportunityName
+    );
+    const assignment = server.state.assignments[0];
+    expect(assignment.properties).toMatchObject({
+      rr_ghl_contact_id: homeowner.id,
+      rr_ghl_opportunity_id: homeownerOpportunity.id,
+      rr_ghl_business_id: business.id
+    });
+    expect(server.state.relations[0]).toMatchObject({
+      firstRecordId: homeowner.id,
+      secondRecordId: assignment.id
+    });
+    const recordedAtField = server.state.legacyFields.find((field: any) =>
+      field.name === 'RR | Source Recorded At UTC'
+    );
+    const deterministicTimestamp = timestampFromTestSuffix(TEST_SUFFIX);
+    expect(homeownerOpportunity.customFields.find((field: any) =>
+      field.id === recordedAtField.id
+    )?.fieldValue).toBe(deterministicTimestamp);
+    expect(assignment.properties.rr_queued_at_utc).toBe(deterministicTimestamp);
+    expect(deterministicTimestamp).not.toContain('2040-01-02');
 
     const second = mockFetch(server.router);
     const secondResult = await runSchemaTool({
@@ -1171,6 +1337,7 @@ describe('RestoreRadar guarded CRM schema apply tool', () => {
       !call.url.pathname.endsWith('/records/search')
     );
     expect(secondMutationPosts).toEqual([]);
+    expect(server.state.writeLog).toHaveLength(75);
   });
 
   test('separates plural schema reads from one server-resolved singular V2 write namespace', () => {
