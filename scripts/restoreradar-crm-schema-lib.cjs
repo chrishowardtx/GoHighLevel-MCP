@@ -990,7 +990,7 @@ async function ensurePipeline(client, manifest, receipt, expected) {
   if (result.state === 'exact') return result.value;
   const created = requireCreatedResource(await client.request('POST', '/opportunities/pipelines', {
     mutating: true,
-    expectedStatus: 200,
+    expectedStatus: 201,
     receiptResource: 'pipeline',
     receiptKey: expected.name,
     body: pipelinePayload(manifest, expected)

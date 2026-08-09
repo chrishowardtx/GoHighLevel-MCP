@@ -56,7 +56,12 @@ The current pages label these contracts `v3` and require the `Version: v3`
 header.
 
 Create success status and envelope handling are endpoint-specific. Pipeline
-create requires HTTP 200 and accepts the documented flat pipeline object.
+create requires HTTP 201 and accepts the flat pipeline object. The official
+[Create Pipeline](https://marketplace.gohighlevel.com/docs/ghl/opportunities/create-pipeline/)
+page still lists HTTP 200, but the controlled RestoreRadar apply on 2026-08-09
+returned HTTP 201 for `POST /opportunities/pipelines`. This tool pins that live
+transport contract; an HTTP 200 response is recorded as accepted transport but
+halts before envelope parsing, readback, or completion.
 Custom Field V2 folder and association creates require HTTP 201 and accept the
 documented flat folder or association object. Legacy custom-field, Custom Field
 V2 field, and custom-object creates require HTTP 201. Previously observed
