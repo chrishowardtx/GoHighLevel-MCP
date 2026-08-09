@@ -101,4 +101,21 @@ describe('current endpoint-specific API contracts', () => {
     );
     await expect(result).rejects.not.toThrow('GHL API Error (500)');
   });
+
+  it('normalizes non-string recording headers to safe string defaults', async () => {
+    request.get.mockResolvedValueOnce({
+      data: new ArrayBuffer(0),
+      headers: {
+        'content-type': 123,
+        'content-disposition': true,
+      },
+    });
+
+    const result = await client.getMessageRecording('message-one');
+
+    expect(result.data?.contentType).toBe('audio/x-wav');
+    expect(result.data?.contentDisposition).toBe(
+      'attachment; filename=audio.wav',
+    );
+  });
 });
