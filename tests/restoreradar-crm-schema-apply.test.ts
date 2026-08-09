@@ -1,4 +1,5 @@
 const {
+  DEFAULT_READBACK_RETRY_DELAYS_MS,
   HighLevelClient,
   assertNoProhibitedPayloadData,
   buildAssignmentRecordPayload,
@@ -9,7 +10,7 @@ const {
   customObjectV2NamespaceFromReadback,
   loadManifest,
   readBusinesses,
-  runSchemaTool,
+  runSchemaTool: runSchemaToolImpl,
   testIds,
   timestampFromTestSuffix
 } = require('../scripts/restoreradar-crm-schema-lib.cjs');
@@ -78,6 +79,14 @@ const NOW = new Date('2026-08-09T12:34:56.000Z');
 const TEST_SUFFIX = '20260809T123456Z';
 const TOKEN = 'test_secret_token_value';
 const AGENCY_TOKEN = 'test_agency_secret_token_value';
+
+function runSchemaTool(options: any) {
+  return runSchemaToolImpl({
+    sleep: async () => {},
+    readbackRetryDelaysMs: [0, 1, 2, 3],
+    ...options
+  });
+}
 
 function credentialEnv() {
   return {
@@ -583,6 +592,7 @@ function statefulMissingSchemaServer(objectReadDelay = 0, options: {
   relationScenario?: RelationScenario;
   objectStandard?: 'missing' | 'null' | 'true';
   createdObjectKey?: string;
+  customFolderReadDelay?: number;
   failure?: {
     family: DocumentedCreateFamily | TestCreateFamily;
     kind: 'wrong-status' | 'missing-id' | 'id-mismatch';
@@ -600,6 +610,7 @@ function statefulMissingSchemaServer(objectReadDelay = 0, options: {
     customFields: [],
     object: null,
     objectReadDelay,
+    customFolderReadDelay: options.customFolderReadDelay || 0,
     associations: [],
     contacts: [],
     businesses: [],
@@ -724,7 +735,12 @@ function statefulMissingSchemaServer(objectReadDelay = 0, options: {
       call.method === 'GET' &&
       pathname === `/custom-fields/object-key/${manifest.customObject.key}`
     ) {
-      return jsonResponse({ fields: state.customFields, folders: state.customFolders });
+      let folders = state.customFolders;
+      if (folders.length && state.customFolderReadDelay > 0) {
+        state.customFolderReadDelay -= 1;
+        folders = [];
+      }
+      return jsonResponse({ fields: state.customFields, folders });
     }
     if (call.method === 'POST' && pathname === '/custom-fields/folder') {
       const folder = { ...call.body, id: nextId('folder') };
@@ -927,6 +943,14 @@ function seedAcceptedLiveObject(
 }
 
 describe('RestoreRadar guarded CRM schema apply tool', () => {
+  test('keeps the default accepted-create visibility window bounded to 2.5 seconds', () => {
+    expect(DEFAULT_READBACK_RETRY_DELAYS_MS).toEqual([0, 250, 750, 1500]);
+    expect(DEFAULT_READBACK_RETRY_DELAYS_MS.reduce(
+      (total: number, delayMs: number) => total + delayMs,
+      0
+    )).toBe(2500);
+  });
+
   test('dry-run performs discovery reads and no writes', async () => {
     const { calls, fetchImpl } = mockFetch((call) => emptyDiscoveryRouter(call));
     const result = await runSchemaTool({
@@ -1640,12 +1664,74 @@ describe('RestoreRadar guarded CRM schema apply tool', () => {
     expect(calls.slice(objectPostIndex + 1).every((call) => call.method === 'GET')).toBe(true);
     expect(calls.filter((call) =>
       call.method === 'GET' && call.url.pathname === `/objects/${server.manifest.customObject.key}`
-    )).toHaveLength(3);
+    )).toHaveLength(4);
     expect(result.receipt.acceptedCreates).toEqual([
       expect.objectContaining({ path: '/objects/', status: 201, credentialRole: 'location' })
     ]);
     expect(result.receipt.summary.acceptedCreates).toBe(1);
     expect(result.receipt.completed).toEqual([]);
+    expect(result.receipt.summary.completedCreates).toBe(0);
+  });
+
+  test('completes one accepted custom-field folder POST after bounded delayed visibility', async () => {
+    const server = statefulMissingSchemaServer(0, { customFolderReadDelay: 2 });
+    seedAcceptedLiveObject(server);
+    const sleep = jest.fn(async (_delayMs: number) => {});
+    const { calls, fetchImpl } = mockFetch(server.router);
+    const result = await runSchemaTool({
+      argv: requiredArgs(['--apply', '--test-suffix', TEST_SUFFIX]),
+      fetchImpl,
+      env: credentialEnv(),
+      now: () => NOW,
+      sleep,
+      readbackRetryDelaysMs: [0, 7, 13]
+    });
+    const targetPosts = calls.filter((call) =>
+      call.method === 'POST' &&
+      call.url.pathname === '/custom-fields/folder' &&
+      call.body.objectKey === server.manifest.customObject.key
+    );
+    expect(result.receipt.verdict).toBe('APPLIED');
+    expect(targetPosts).toHaveLength(1);
+    expect(sleep.mock.calls).toEqual([[7], [13]]);
+    expect(result.receipt.acceptedCreates.filter((entry: any) =>
+      entry.resource === 'customFieldFolder' &&
+      entry.key === `${server.manifest.customObject.key}:${server.manifest.customObject.folder}`
+    )).toHaveLength(1);
+    expect(result.receipt.completed.filter((entry: any) =>
+      entry.resource === 'customFieldFolder' &&
+      entry.key === `${server.manifest.customObject.key}:${server.manifest.customObject.folder}`
+    )).toHaveLength(1);
+  });
+
+  test('halts one accepted custom-field folder POST as unverified after bounded permanent invisibility', async () => {
+    const server = statefulMissingSchemaServer(0, { customFolderReadDelay: 99 });
+    seedAcceptedLiveObject(server);
+    const sleep = jest.fn(async (_delayMs: number) => {});
+    const { calls, fetchImpl } = mockFetch(server.router);
+    const result = await runSchemaTool({
+      argv: requiredArgs(['--apply', '--test-suffix', TEST_SUFFIX]),
+      fetchImpl,
+      env: credentialEnv(),
+      now: () => NOW,
+      sleep,
+      readbackRetryDelaysMs: [0, 7, 13]
+    });
+    const mutationPosts = calls.filter((call) => call.method === 'POST');
+    expect(result.receipt.verdict).toBe('HALTED');
+    expect(result.receipt.haltReason.code).toBe('CREATE_ACCEPTED_READBACK_PENDING');
+    expect(mutationPosts).toHaveLength(1);
+    expect(mutationPosts[0].url.pathname).toBe('/custom-fields/folder');
+    expect(mutationPosts[0].body.objectKey).toBe(server.manifest.customObject.key);
+    expect(sleep.mock.calls).toEqual([[7], [13]]);
+    expect(result.receipt.acceptedCreates).toEqual([
+      expect.objectContaining({
+        resource: 'customFieldFolder',
+        key: `${server.manifest.customObject.key}:${server.manifest.customObject.folder}`
+      })
+    ]);
+    expect(result.receipt.completed).toEqual([]);
+    expect(result.receipt.summary.acceptedCreates).toBe(1);
     expect(result.receipt.summary.completedCreates).toBe(0);
   });
 

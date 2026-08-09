@@ -6,6 +6,7 @@ const path = require('node:path');
 
 const OFFICIAL_BASE_URL = 'https://services.leadconnectorhq.com';
 const API_VERSION = 'v3';
+const DEFAULT_READBACK_RETRY_DELAYS_MS = Object.freeze([0, 250, 750, 1500]);
 const DEFAULT_MANIFEST_PATH = path.resolve(
   __dirname,
   '../spec/restoreradar-crm-schema-v1.json'
@@ -199,10 +200,38 @@ function sanitizeError(error) {
   return { code, message };
 }
 
+function defaultSleep(delayMs) {
+  return new Promise((resolve) => setTimeout(resolve, delayMs));
+}
+
 class HighLevelClient {
-  constructor({ token, fetchImpl, apply, receipt, locationId, companyId, role }) {
+  constructor({
+    token,
+    fetchImpl,
+    apply,
+    receipt,
+    locationId,
+    companyId,
+    role,
+    sleep = defaultSleep,
+    readbackRetryDelaysMs = DEFAULT_READBACK_RETRY_DELAYS_MS
+  }) {
     if (typeof fetchImpl !== 'function') {
       throw new GuardError('FETCH_UNAVAILABLE', 'A fetch implementation is required');
+    }
+    if (typeof sleep !== 'function') {
+      throw new GuardError('SLEEP_UNAVAILABLE', 'A sleep implementation is required');
+    }
+    if (
+      !Array.isArray(readbackRetryDelaysMs) ||
+      !readbackRetryDelaysMs.length ||
+      readbackRetryDelaysMs[0] !== 0 ||
+      readbackRetryDelaysMs.some((delayMs) => !Number.isFinite(delayMs) || delayMs < 0)
+    ) {
+      throw new GuardError(
+        'READBACK_RETRY_CONFIG_INVALID',
+        'Readback retry delays must be a nonempty nonnegative list beginning with zero'
+      );
     }
     this.token = token;
     this.fetchImpl = fetchImpl;
@@ -210,6 +239,8 @@ class HighLevelClient {
     this.receipt = receipt;
     this.locationId = locationId;
     this.companyId = companyId;
+    this.sleep = sleep;
+    this.readbackRetryDelaysMs = [...readbackRetryDelaysMs];
     if (role !== 'agency' && role !== 'location') {
       throw new GuardError('CREDENTIAL_ROLE_REQUIRED', 'Client role must be agency or location');
     }
@@ -912,6 +943,36 @@ function requireMatchingCreatedId(created, readback, resource) {
   }
 }
 
+async function retryAcceptedCreateReadback(client, { read, evaluate, pendingMessage }) {
+  for (const delayMs of client.readbackRetryDelaysMs) {
+    if (delayMs > 0) await client.sleep(delayMs);
+    let result;
+    try {
+      result = evaluate(await read());
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 404) {
+        result = { state: 'missing' };
+      } else {
+        throw error;
+      }
+    }
+    if (result?.state === 'exact') return result.value;
+    if (result?.state === 'collision') {
+      throw new GuardError(
+        result.code || 'INCOMPATIBLE_COLLISION',
+        result.reason || 'Accepted create readback exposed an incompatible resource'
+      );
+    }
+    if (result?.state !== 'missing' && result?.state !== 'unproven') {
+      throw new GuardError(
+        'READBACK_EVALUATION_INVALID',
+        'Accepted create readback returned an unknown validation state'
+      );
+    }
+  }
+  throw new GuardError('CREATE_ACCEPTED_READBACK_PENDING', pendingMessage);
+}
+
 function pipelinePayload(manifest, pipeline) {
   return {
     name: pipeline.name,
@@ -934,13 +995,14 @@ async function ensurePipeline(client, manifest, receipt, expected) {
     receiptKey: expected.name,
     body: pipelinePayload(manifest, expected)
   }), ['pipeline', 'data.pipeline', '$'], 'pipeline', receipt);
-  result = requireNoCollision(findPipeline(await readPipelines(client, manifest, receipt), expected));
-  if (result.state !== 'exact') {
-    throw new GuardError('CREATE_READBACK_FAILED', `Pipeline ${expected.name} was not confirmed after create`);
-  }
-  requireMatchingCreatedId(created, result.value, `Pipeline ${expected.name}`);
+  const readback = await retryAcceptedCreateReadback(client, {
+    read: () => readPipelines(client, manifest, receipt),
+    evaluate: (pipelines) => findPipeline(pipelines, expected),
+    pendingMessage: `Pipeline ${expected.name} create was accepted but remained invisible`
+  });
+  requireMatchingCreatedId(created, readback, `Pipeline ${expected.name}`);
   recordCompletedCreate(receipt, 'pipeline', expected.name, '/opportunities/pipelines');
-  return result.value;
+  return readback;
 }
 
 async function ensureLegacyField(client, manifest, receipt, model, name) {
@@ -955,14 +1017,14 @@ async function ensureLegacyField(client, manifest, receipt, model, name) {
     receiptKey: name,
     body: { name, dataType: 'TEXT', model }
   }), ['customField', 'data.customField'], `${model} field`, receipt);
-  fields = await readLegacyFields(client, manifest, receipt, model);
-  result = requireNoCollision(findLegacyField(fields, model, name));
-  if (result.state !== 'exact') {
-    throw new GuardError('CREATE_READBACK_FAILED', `${model} field ${name} was not confirmed after create`);
-  }
-  requireMatchingCreatedId(created, result.value, `${model} field ${name}`);
+  const readback = await retryAcceptedCreateReadback(client, {
+    read: () => readLegacyFields(client, manifest, receipt, model),
+    evaluate: (currentFields) => findLegacyField(currentFields, model, name),
+    pendingMessage: `${model} field ${name} create was accepted but remained invisible`
+  });
+  requireMatchingCreatedId(created, readback, `${model} field ${name}`);
   recordCompletedCreate(receipt, `${model}Field`, name, endpoint);
-  return result.value;
+  return readback;
 }
 
 async function ensureFolder(client, manifest, receipt, schemaKey, writeObjectKey, name) {
@@ -976,14 +1038,14 @@ async function ensureFolder(client, manifest, receipt, schemaKey, writeObjectKey
     receiptKey: `${writeObjectKey}:${name}`,
     body: { objectKey: writeObjectKey, name, locationId: manifest.identity.locationId }
   }), ['folder', 'data.folder', '$'], 'custom field folder', receipt);
-  current = await readV2Fields(client, manifest, receipt, schemaKey);
-  result = requireNoCollision(findFolder(current.folders, writeObjectKey, name));
-  if (result.state !== 'exact') {
-    throw new GuardError('CREATE_READBACK_FAILED', `Folder ${name} for ${writeObjectKey} was not confirmed`);
-  }
-  requireMatchingCreatedId(created, result.value, `Folder ${name}`);
+  const readback = await retryAcceptedCreateReadback(client, {
+    read: () => readV2Fields(client, manifest, receipt, schemaKey),
+    evaluate: (readbackState) => findFolder(readbackState.folders, writeObjectKey, name),
+    pendingMessage: `Folder ${name} for ${writeObjectKey} was accepted but remained invisible`
+  });
+  requireMatchingCreatedId(created, readback, `Folder ${name}`);
   recordCompletedCreate(receipt, 'customFieldFolder', `${writeObjectKey}:${name}`, '/custom-fields/folder');
-  return result.value;
+  return readback;
 }
 
 async function ensureV2Field(
@@ -1020,18 +1082,18 @@ async function ensureV2Field(
       parentId: folderId
     }
   }), ['field', 'customField', 'data.field', 'data.customField'], 'custom field', receipt);
-  current = await readV2Fields(client, manifest, receipt, schemaKey);
-  result = requireNoCollision(findV2Field(current.fields, expected, {
-    bySuffix,
-    objectKey: writeObjectKey,
-    parentId: folderId
-  }));
-  if (result.state !== 'exact') {
-    throw new GuardError('CREATE_READBACK_FAILED', `V2 field ${expected.name} was not confirmed`);
-  }
-  requireMatchingCreatedId(created, result.value, `V2 field ${expected.name}`);
+  const readback = await retryAcceptedCreateReadback(client, {
+    read: () => readV2Fields(client, manifest, receipt, schemaKey),
+    evaluate: (readbackState) => findV2Field(readbackState.fields, expected, {
+      bySuffix,
+      objectKey: writeObjectKey,
+      parentId: folderId
+    }),
+    pendingMessage: `V2 field ${expected.name} create was accepted but remained invisible`
+  });
+  requireMatchingCreatedId(created, readback, `V2 field ${expected.name}`);
   recordCompletedCreate(receipt, 'customField', fieldKey, '/custom-fields/');
-  return result.value;
+  return readback;
 }
 
 function exactCreatedCustomObject(object, manifest) {
@@ -1075,36 +1137,18 @@ async function ensureCustomObject(client, manifest, receipt) {
       'Custom object create response did not exactly match the requested RestoreRadar object'
     );
   }
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    try {
-      const details = await readObjectDetails(
-        client,
-        manifest,
-        receipt,
-        manifest.customObject.key
-      );
-      const direct = requireNoCollision(findObject(
-        [details.object],
-        manifest.customObject,
-        manifest.identity.locationId
-      ));
-      if (direct.state !== 'exact' || !exactCreatedCustomObject(details.object, manifest)) {
-        throw new GuardError(
-          'CREATE_READBACK_FAILED',
-          'Custom object direct readback was not an exact RestoreRadar match'
-        );
-      }
-      requireMatchingCreatedId(created, details.object, 'Custom object');
-      recordCompletedCreate(receipt, 'customObject', manifest.customObject.key, '/objects/');
-      return details.object;
-    } catch (error) {
-      if (!(error instanceof ApiError) || error.status !== 404) throw error;
-    }
-  }
-  throw new GuardError(
-    'CREATE_ACCEPTED_READBACK_PENDING',
-    'Custom object create returned an ID but direct readback was not visible after bounded retries'
-  );
+  const readback = await retryAcceptedCreateReadback(client, {
+    read: () => readObjectDetails(client, manifest, receipt, manifest.customObject.key),
+    evaluate: (details) => findObject(
+      [details.object],
+      manifest.customObject,
+      manifest.identity.locationId
+    ),
+    pendingMessage: 'Custom object create returned an ID but direct readback remained invisible'
+  });
+  requireMatchingCreatedId(created, readback, 'Custom object');
+  recordCompletedCreate(receipt, 'customObject', manifest.customObject.key, '/objects/');
+  return readback;
 }
 
 async function resolveCustomObjectV2Namespace(client, manifest, receipt, schemaKey) {
@@ -1130,14 +1174,14 @@ async function ensureAssociation(client, manifest, receipt) {
     receiptKey: manifest.association.key,
     body: { locationId: manifest.identity.locationId, ...manifest.association }
   }), ['association', 'data.association', '$'], 'association', receipt);
-  associations = await readAssociations(client, manifest, receipt);
-  result = requireNoCollision(findAssociation(associations, manifest.association));
-  if (result.state !== 'exact') {
-    throw new GuardError('CREATE_READBACK_FAILED', 'Association was not confirmed after create');
-  }
-  requireMatchingCreatedId(created, result.value, 'Association');
+  const readback = await retryAcceptedCreateReadback(client, {
+    read: () => readAssociations(client, manifest, receipt),
+    evaluate: (currentAssociations) => findAssociation(currentAssociations, manifest.association),
+    pendingMessage: 'Association create was accepted but remained invisible'
+  });
+  requireMatchingCreatedId(created, readback, 'Association');
   recordCompletedCreate(receipt, 'association', manifest.association.key, '/associations/');
-  return result.value;
+  return readback;
 }
 
 async function applySchema(locationClient, manifest, receipt) {
@@ -1488,11 +1532,16 @@ async function ensureTestContact(client, manifest, receipt, name, payload) {
     'TEST contact',
     receipt
   );
-  const readback = await readContact(client, receipt, created.id);
-  requireMatchingCreatedId(created, readback, `TEST contact ${name}`);
-  if (!exactTestContactReadback(readback, payload)) {
-    throw new GuardError('CREATE_READBACK_FAILED', `TEST contact ${name} failed safe readback validation`);
-  }
+  const readback = await retryAcceptedCreateReadback(client, {
+    read: () => readContact(client, receipt, created.id),
+    evaluate: (contactReadback) => {
+      requireMatchingCreatedId(created, contactReadback, `TEST contact ${name}`);
+      return exactTestContactReadback(contactReadback, payload)
+        ? { state: 'exact', value: contactReadback }
+        : { state: 'unproven' };
+    },
+    pendingMessage: `TEST contact ${name} create was accepted but exact readback remained unproven`
+  });
   recordCompletedCreate(receipt, 'testContact', name, '/contacts/');
   return readback;
 }
@@ -1607,11 +1656,16 @@ async function ensureTestBusiness(client, manifest, receipt, name, payload) {
     'TEST business',
     receipt
   );
-  const readback = await readObjectRecord(client, receipt, 'business', created.id);
-  requireMatchingCreatedId(created, readback, `TEST business ${name}`);
-  if (!safeBusinessReadback(readback, payload.properties, manifest)) {
-    throw new GuardError('CREATE_READBACK_FAILED', `TEST business ${name} failed exact readback`);
-  }
+  const readback = await retryAcceptedCreateReadback(client, {
+    read: () => readObjectRecord(client, receipt, 'business', created.id),
+    evaluate: (businessReadback) => {
+      requireMatchingCreatedId(created, businessReadback, `TEST business ${name}`);
+      return safeBusinessReadback(businessReadback, payload.properties, manifest)
+        ? { state: 'exact', value: businessReadback }
+        : { state: 'unproven' };
+    },
+    pendingMessage: `TEST business ${name} create was accepted but exact readback remained unproven`
+  });
   recordCompletedCreate(receipt, 'testBusiness', name, '/objects/business/records');
   return { id: created.id, name, ...readback };
 }
@@ -1676,11 +1730,16 @@ async function ensureTestOpportunity(client, manifest, receipt, name, payload) {
     'TEST opportunity',
     receipt
   );
-  const readback = await readOpportunity(client, receipt, created.id);
-  requireMatchingCreatedId(created, readback, `TEST opportunity ${name}`);
-  if (!exactTestOpportunityReadback(readback, payload)) {
-    throw new GuardError('CREATE_READBACK_FAILED', `TEST opportunity ${name} failed exact readback`);
-  }
+  const readback = await retryAcceptedCreateReadback(client, {
+    read: () => readOpportunity(client, receipt, created.id),
+    evaluate: (opportunityReadback) => {
+      requireMatchingCreatedId(created, opportunityReadback, `TEST opportunity ${name}`);
+      return exactTestOpportunityReadback(opportunityReadback, payload)
+        ? { state: 'exact', value: opportunityReadback }
+        : { state: 'unproven' };
+    },
+    pendingMessage: `TEST opportunity ${name} create was accepted but exact readback remained unproven`
+  });
   recordCompletedCreate(receipt, 'testOpportunity', name, '/opportunities/');
   return readback;
 }
@@ -1739,16 +1798,16 @@ async function ensureTestAssignment(client, manifest, receipt, externalId, paylo
       body: payload
     }
   ), ['record', 'data.record'], 'TEST assignment', receipt);
-  const readback = await readObjectRecord(
-    client,
-    receipt,
-    manifest.customObject.key,
-    created.id
-  );
-  requireMatchingCreatedId(created, readback, 'TEST assignment');
-  if (!propertiesMatch(readback.properties, payload.properties)) {
-    throw new GuardError('CREATE_READBACK_FAILED', 'TEST assignment failed exact readback');
-  }
+  const readback = await retryAcceptedCreateReadback(client, {
+    read: () => readObjectRecord(client, receipt, manifest.customObject.key, created.id),
+    evaluate: (assignmentReadback) => {
+      requireMatchingCreatedId(created, assignmentReadback, 'TEST assignment');
+      return propertiesMatch(assignmentReadback.properties, payload.properties)
+        ? { state: 'exact', value: assignmentReadback }
+        : { state: 'unproven' };
+    },
+    pendingMessage: 'TEST assignment create was accepted but exact readback remained unproven'
+  });
   recordCompletedCreate(receipt, 'testAssignment', externalId, `/objects/${manifest.customObject.key}/records`);
   return readback;
 }
@@ -1878,25 +1937,20 @@ async function ensureTestRelation(client, manifest, receipt, association, homeow
     receiptKey: `${homeownerId}:${assignmentId}`,
     body
   });
-  const createdProof = await readTwoSidedRelationProof(
-    client,
-    manifest,
-    receipt,
-    association.id,
-    homeownerId,
-    assignmentId
-  );
-  if (createdProof.state !== 'exact') {
-    if (createdProof.state === 'collision') {
-      throw new GuardError(createdProof.code, createdProof.reason);
-    }
-    throw new GuardError(
-      'CREATE_ACCEPTED_READBACK_PENDING',
-      'Relation create was accepted but two-sided exact readback was not proven'
-    );
-  }
+  const createdProof = await retryAcceptedCreateReadback(client, {
+    read: () => readTwoSidedRelationProof(
+      client,
+      manifest,
+      receipt,
+      association.id,
+      homeownerId,
+      assignmentId
+    ),
+    evaluate: (proof) => proof,
+    pendingMessage: 'Relation create was accepted but two-sided exact readback remained unproven'
+  });
   recordCompletedCreate(receipt, 'testRelation', `${homeownerId}:${assignmentId}`, '/associations/relations');
-  return createdProof.value;
+  return createdProof;
 }
 
 function legacyFieldIdMap(fields, model) {
@@ -2052,7 +2106,9 @@ async function runSchemaTool({
   env = process.env,
   now = () => new Date(),
   keychainReader,
-  manifestPath = DEFAULT_MANIFEST_PATH
+  manifestPath = DEFAULT_MANIFEST_PATH,
+  sleep = defaultSleep,
+  readbackRetryDelaysMs = DEFAULT_READBACK_RETRY_DELAYS_MS
 }) {
   const manifest = loadManifest(manifestPath);
   let options;
@@ -2085,7 +2141,9 @@ async function runSchemaTool({
       apply: options.apply,
       receipt,
       locationId: manifest.identity.locationId,
-      companyId: manifest.identity.companyId
+      companyId: manifest.identity.companyId,
+      sleep,
+      readbackRetryDelaysMs
     };
     const agencyClient = new HighLevelClient({
       ...sharedClientOptions,
@@ -2190,6 +2248,7 @@ function helpText() {
 module.exports = {
   API_VERSION,
   DEFAULT_MANIFEST_PATH,
+  DEFAULT_READBACK_RETRY_DELAYS_MS,
   OFFICIAL_BASE_URL,
   GuardError,
   HighLevelClient,
