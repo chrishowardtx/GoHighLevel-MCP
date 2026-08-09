@@ -45,10 +45,10 @@
     "typescript": "^5.8.3"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.12.1",
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "@types/cors": "^2.8.18",
     "@types/express": "^5.0.2",
-    "axios": "^1.9.0",
+    "axios": "^1.18.0",
     "cors": "^2.8.5",
     "dotenv": "^16.5.0",
     "express": "^5.1.0"

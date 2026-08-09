@@ -2931,10 +2931,17 @@ export class GHLApiClient {
         }
       );
 
+      const contentType = response.headers['content-type'];
+      const contentDisposition = response.headers['content-disposition'];
       const recordingResponse: GHLMessageRecordingResponse = {
         audioData: response.data,
-        contentType: response.headers['content-type'] || 'audio/x-wav',
-        contentDisposition: response.headers['content-disposition'] || 'attachment; filename=audio.wav'
+        contentType: typeof contentType === 'string' && contentType
+          ? contentType
+          : 'audio/x-wav',
+        contentDisposition:
+          typeof contentDisposition === 'string' && contentDisposition
+            ? contentDisposition
+            : 'attachment; filename=audio.wav'
       };
 
       return this.wrapResponse(recordingResponse);
