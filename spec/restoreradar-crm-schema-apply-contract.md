@@ -87,7 +87,11 @@ namespace; missing or conflicting evidence halts the run.
 
 An existing custom object must reconcile the collection result with direct
 object details. Both representations must carry the same nonempty ID and the
-exact non-standard/location/key/labels/description/primary-property contract.
+exact location/key/labels/description/primary-property contract, and the key
+must begin with `custom_objects.`. Current live v3 list, create, and direct
+representations may omit `standard` and `objectType`; `standard: false`, null,
+or absence is accepted, while `standard: true` or any other value is rejected.
+`objectType` is not treated as authoritative when the API omits it.
 Namespace proof also requires exactly one primary field matching the manifest:
 nonempty ID, name `RR Assignment ID`, type `TEXT`, allowed singular-or-plural
 RR object namespace, and a field key equal to that object key plus
@@ -100,7 +104,9 @@ reads and every create, including custom-object schema POST.
 Protocol-relative paths, alternate origins, cross-company/location payloads,
 and role-crossing endpoints are rejected before network dispatch. A successful
 object schema create must be HTTP 201 with the exact server object ID, location,
-key, labels, description, and primary property before any later POST can run.
+namespaced key, labels, description, and primary property before any later POST
+can run. Its `standard` classification follows the same false/null/absent-only
+rule as list and direct readback.
 Every create response except relation create must expose a server-assigned ID.
 The tool matches that ID against a direct record read where the API supports
 one, otherwise against the exact collection readback. Object-schema visibility
@@ -158,10 +164,18 @@ creates from an empty RestoreRadar schema; the custom object is first and every
 create uses the location credential. A replay of that exact state performs zero
 mutations.
 
-An existing custom object is exact only when it is explicitly non-standard
-(`standard: false`), belongs to the pinned RestoreRadar location, and matches
-the complete namespaced object contract. A same-key or same-label standard
-object, or an object from another location, is an incompatible collision.
+An existing custom object is exact only when it is not declared standard,
+belongs to the pinned RestoreRadar location, begins with the
+`custom_objects.` namespace, and matches the complete pinned object contract.
+A same-key or same-label object with `standard: true`, a non-custom key prefix,
+or an object from another location is an incompatible collision.
+
+If an earlier run received an accepted object create but halted before marking
+it completed, exact list/direct/primary-field evidence recovers that object
+without another object POST. The live partial-state regression reports one
+existing object and 67 planned schema creates in dry-run, then applies the
+remaining schema and unmistakable TEST records under the same suffix. A replay
+of that suffix performs zero mutations.
 
 The receipt distinguishes transport acceptance from verification. Every
 mutating request that receives any 2xx response is appended immediately to

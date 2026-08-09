@@ -278,7 +278,8 @@ function completeFixture() {
 function completeRouter(call: FetchCall, overrides: {
   wrongBusinessFolder?: boolean;
   wrongBusinessObjectKey?: boolean;
-  wrongObjectStandard?: boolean;
+  objectStandard?: 'missing' | 'null' | 'true';
+  wrongObjectKeyPrefix?: boolean;
   wrongObjectLocation?: boolean;
   directObjectIdMismatch?: boolean;
   directObjectContractMismatch?: boolean;
@@ -314,7 +315,10 @@ function completeRouter(call: FetchCall, overrides: {
     const field = fixture.businessFields.find((entry: any) => entry.name.startsWith('RR |'));
     field.objectKey = 'wrong.business';
   }
-  if (overrides.wrongObjectStandard) fixture.object.standard = true;
+  if (overrides.objectStandard === 'missing') delete fixture.object.standard;
+  if (overrides.objectStandard === 'null') fixture.object.standard = null;
+  if (overrides.objectStandard === 'true') fixture.object.standard = true;
+  if (overrides.wrongObjectKeyPrefix) fixture.object.key = 'rr_lead_assignment';
   if (overrides.wrongObjectLocation) fixture.object.locationId = 'wrong-location';
   if (overrides.primaryFieldIssue === 'missing-id') delete fixture.primaryField.id;
   if (overrides.primaryFieldIssue === 'wrong-name') fixture.primaryField.name = 'Wrong Primary Name';
@@ -577,6 +581,8 @@ function completeRouter(call: FetchCall, overrides: {
 function statefulMissingSchemaServer(objectReadDelay = 0, options: {
   envelope?: 'flat' | 'wrapper';
   relationScenario?: RelationScenario;
+  objectStandard?: 'missing' | 'null' | 'true';
+  createdObjectKey?: string;
   failure?: {
     family: DocumentedCreateFamily | TestCreateFamily;
     kind: 'wrong-status' | 'missing-id' | 'id-mismatch';
@@ -690,6 +696,10 @@ function statefulMissingSchemaServer(objectReadDelay = 0, options: {
         standard: false,
         primaryDisplayProperty: call.body.primaryDisplayPropertyDetails.key
       };
+      if (options.objectStandard === 'missing') delete state.object.standard;
+      if (options.objectStandard === 'null') state.object.standard = null;
+      if (options.objectStandard === 'true') state.object.standard = true;
+      if (options.createdObjectKey) state.object.key = options.createdObjectKey;
       state.customFields.push({
         id: nextId('assignment_primary'),
         name: call.body.primaryDisplayPropertyDetails.name,
@@ -892,6 +902,30 @@ function statefulMissingSchemaServer(objectReadDelay = 0, options: {
   return { manifest, router, state };
 }
 
+function seedAcceptedLiveObject(
+  server: ReturnType<typeof statefulMissingSchemaServer>,
+  standard: 'missing' | 'null' = 'missing'
+) {
+  const { manifest, state } = server;
+  state.object = {
+    id: 'object_live_accepted',
+    locationId: manifest.identity.locationId,
+    key: manifest.customObject.key,
+    labels: manifest.customObject.labels,
+    description: manifest.customObject.description,
+    primaryDisplayProperty: manifest.customObject.primaryDisplayPropertyDetails.key
+  };
+  if (standard === 'null') state.object.standard = null;
+  state.customFields = [{
+    id: 'assignment_primary_live',
+    name: manifest.customObject.primaryDisplayPropertyDetails.name,
+    fieldKey: `${manifest.customObject.key}.rr_assignment_id`,
+    objectKey: manifest.customObject.key,
+    dataType: 'TEXT',
+    options: []
+  }];
+}
+
 describe('RestoreRadar guarded CRM schema apply tool', () => {
   test('dry-run performs discovery reads and no writes', async () => {
     const { calls, fetchImpl } = mockFetch((call) => emptyDiscoveryRouter(call));
@@ -1054,10 +1088,31 @@ describe('RestoreRadar guarded CRM schema apply tool', () => {
     expect(calls.every((call) => call.method === 'GET')).toBe(true);
   });
 
+  test.each(['missing', 'null'] as const)(
+    'accepts an otherwise exact custom object when standard is %s in list and direct readback',
+    async (objectStandard) => {
+      const { calls, fetchImpl } = mockFetch((call) =>
+        completeRouter(call, { objectStandard })
+      );
+      const result = await runSchemaTool({
+        argv: requiredArgs(),
+        fetchImpl,
+        env: credentialEnv(),
+        now: () => NOW
+      });
+      expect(result.exitCode).toBe(0);
+      expect(result.receipt.verdict).toBe('READY');
+      expect(result.receipt.collisions).toEqual([]);
+      expect(result.receipt.blockers).toEqual([]);
+      expect(calls.every((call) => call.method === 'GET')).toBe(true);
+    }
+  );
+
   test.each([
-    ['standard custom object', { wrongObjectStandard: true }],
+    ['standard custom object', { objectStandard: 'true' }],
+    ['custom object without the custom_objects namespace', { wrongObjectKeyPrefix: true }],
     ['custom object from another location', { wrongObjectLocation: true }]
-  ])('rejects an otherwise exact %s during read-only discovery', async (_label, overrides) => {
+  ] as const)('rejects an otherwise exact %s during read-only discovery', async (_label, overrides) => {
     const { calls, fetchImpl } = mockFetch((call) => completeRouter(call, overrides));
     const result = await runSchemaTool({
       argv: requiredArgs(),
@@ -1469,6 +1524,44 @@ describe('RestoreRadar guarded CRM schema apply tool', () => {
     expect(calls.every((call) => call.method === 'GET')).toBe(true);
   });
 
+  test.each(['missing', 'null'] as const)(
+    'accepts an exact object create response when standard is %s',
+    async (objectStandard) => {
+      const server = statefulMissingSchemaServer(99, { objectStandard });
+      const { calls, fetchImpl } = mockFetch(server.router);
+      const result = await runSchemaTool({
+        argv: requiredArgs(['--apply', '--test-suffix', TEST_SUFFIX]),
+        fetchImpl,
+        env: credentialEnv(),
+        now: () => NOW
+      });
+      expect(result.receipt.haltReason.code).toBe('CREATE_ACCEPTED_READBACK_PENDING');
+      expect(calls.filter((call) => call.method === 'POST')).toHaveLength(1);
+      expect(result.receipt.acceptedCreates).toEqual([
+        expect.objectContaining({ path: '/objects/', credentialRole: 'location' })
+      ]);
+      expect(result.receipt.completed).toEqual([]);
+    }
+  );
+
+  test.each([
+    ['standard true', { objectStandard: 'true' }],
+    ['a non-custom key prefix', { createdObjectKey: 'rr_lead_assignment' }]
+  ] as const)('rejects an object create response with %s', async (_label, options) => {
+    const server = statefulMissingSchemaServer(0, options);
+    const { calls, fetchImpl } = mockFetch(server.router);
+    const result = await runSchemaTool({
+      argv: requiredArgs(['--apply', '--test-suffix', TEST_SUFFIX]),
+      fetchImpl,
+      env: credentialEnv(),
+      now: () => NOW
+    });
+    expect(result.receipt.haltReason.code).toBe('MALFORMED_OBJECT_CREATE_RESPONSE');
+    expect(calls.filter((call) => call.method === 'POST')).toHaveLength(1);
+    expect(result.receipt.acceptedCreates).toHaveLength(1);
+    expect(result.receipt.completed).toEqual([]);
+  });
+
   test('object create is the first POST and malformed 201 response halts bulk creates', async () => {
     const manifest = loadManifest();
     const { calls, fetchImpl } = mockFetch((call) => {
@@ -1554,6 +1647,64 @@ describe('RestoreRadar guarded CRM schema apply tool', () => {
     expect(result.receipt.summary.acceptedCreates).toBe(1);
     expect(result.receipt.completed).toEqual([]);
     expect(result.receipt.summary.completedCreates).toBe(0);
+  });
+
+  test('recovers the accepted live object without recreating it, then safely replays the same suffix', async () => {
+    const server = statefulMissingSchemaServer();
+    seedAcceptedLiveObject(server);
+
+    const dryRun = mockFetch(server.router);
+    const dryRunResult = await runSchemaTool({
+      argv: requiredArgs(),
+      fetchImpl: dryRun.fetchImpl,
+      env: credentialEnv(),
+      now: () => NOW
+    });
+    expect(dryRunResult.receipt.verdict).toBe('READY');
+    expect(dryRunResult.receipt.summary.existing).toBe(1);
+    expect(dryRunResult.receipt.summary.plannedCreates).toBe(67);
+    expect(dryRunResult.receipt.summary.acceptedCreates).toBe(0);
+    expect(dryRunResult.receipt.summary.completedCreates).toBe(0);
+    expect(dryRunResult.receipt.acceptedCreates).toEqual([]);
+    expect(dryRunResult.receipt.completed).toEqual([]);
+    expect(dryRun.calls.every((call) => call.method === 'GET')).toBe(true);
+
+    const recovery = mockFetch(server.router);
+    const recoveryResult = await runSchemaTool({
+      argv: requiredArgs(['--apply', '--test-suffix', TEST_SUFFIX]),
+      fetchImpl: recovery.fetchImpl,
+      env: credentialEnv(),
+      now: () => NOW
+    });
+    const recoveryMutations = recovery.calls.filter((call) =>
+      call.method === 'POST' &&
+      call.url.pathname !== '/contacts/search' &&
+      !call.url.pathname.endsWith('/records/search')
+    );
+    expect(recoveryResult.receipt.verdict).toBe('APPLIED');
+    expect(recoveryMutations).toHaveLength(74);
+    expect(recoveryMutations.some((call) => call.url.pathname === '/objects/')).toBe(false);
+    expect(recoveryResult.receipt.acceptedCreates).toHaveLength(74);
+    expect(recoveryResult.receipt.completed).toHaveLength(74);
+    expect(server.state.writeLog).toHaveLength(74);
+
+    const replay = mockFetch(server.router);
+    const replayResult = await runSchemaTool({
+      argv: requiredArgs(['--apply', '--test-suffix', TEST_SUFFIX]),
+      fetchImpl: replay.fetchImpl,
+      env: credentialEnv(),
+      now: () => new Date('2035-06-07T08:09:10.000Z')
+    });
+    const replayMutations = replay.calls.filter((call) =>
+      call.method === 'POST' &&
+      call.url.pathname !== '/contacts/search' &&
+      !call.url.pathname.endsWith('/records/search')
+    );
+    expect(replayResult.receipt.verdict).toBe('APPLIED');
+    expect(replayResult.receipt.acceptedCreates).toEqual([]);
+    expect(replayResult.receipt.completed).toEqual([]);
+    expect(replayMutations).toEqual([]);
+    expect(server.state.writeLog).toHaveLength(74);
   });
 
   test('creates the full TEST graph from an arbitrary relation body only after two-sided proof, then replays with zero writes', async () => {
