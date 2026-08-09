@@ -24,19 +24,19 @@ type FetchCall = {
   body?: any;
 };
 
-type DocumentedCreateFamily =
+type SchemaCreateFamily =
   | 'pipeline'
   | 'legacy-field'
   | 'v2-folder'
   | 'v2-field'
   | 'association';
 
-const DOCUMENTED_CREATE_FAMILIES: Array<{
-  family: DocumentedCreateFamily;
+const SCHEMA_CREATE_FAMILIES: Array<{
+  family: SchemaCreateFamily;
   path: string;
   status: number;
 }> = [
-  { family: 'pipeline', path: '/opportunities/pipelines', status: 200 },
+  { family: 'pipeline', path: '/opportunities/pipelines', status: 201 },
   { family: 'legacy-field', path: `/locations/${loadManifest().identity.locationId}/customFields`, status: 201 },
   { family: 'v2-folder', path: '/custom-fields/folder', status: 201 },
   { family: 'v2-field', path: '/custom-fields/', status: 201 },
@@ -607,7 +607,7 @@ function statefulMissingSchemaServer(objectReadDelay = 0, options: {
   createdObjectKey?: string;
   customFolderReadDelay?: number;
   failure?: {
-    family: DocumentedCreateFamily | TestCreateFamily;
+    family: SchemaCreateFamily | TestCreateFamily;
     kind: 'wrong-status' | 'missing-id' | 'id-mismatch';
   };
 } = {}) {
@@ -688,7 +688,7 @@ function statefulMissingSchemaServer(objectReadDelay = 0, options: {
         stages: call.body.stages.map((stage: any) => ({ ...stage, id: nextId('stage') }))
       };
       state.pipelines.push(pipeline);
-      return createResponse('pipeline', 'pipeline', pipeline, 200, true);
+      return createResponse('pipeline', 'pipeline', pipeline, 201, true);
     }
     if (call.method === 'GET' && pathname.endsWith('/customFields')) {
       const model = call.url.searchParams.get('model');
@@ -988,6 +988,42 @@ function seedLiveNormalizedEnvironmentState(
       })
     )
   );
+}
+
+function seedLiveAcceptedHomeownerPipelineState(
+  server: ReturnType<typeof statefulMissingSchemaServer>
+) {
+  seedAcceptedLiveObject(server);
+  const { manifest, state } = server;
+  const folder = {
+    id: 'assignment_folder_live_complete',
+    objectKey: manifest.customObject.key,
+    name: manifest.customObject.folder
+  };
+  state.customFolders = [folder];
+  state.customFields.push(
+    ...manifest.customObject.fields.map((field: any, index: number) => ({
+      id: `assignment_live_complete_field_${index}`,
+      name: field.name,
+      fieldKey: `${manifest.customObject.key}.${field.suffix}`,
+      objectKey: manifest.customObject.key,
+      parentId: folder.id,
+      dataType: field.dataType,
+      options: field.options || []
+    }))
+  );
+  const homeownerPipeline = manifest.pipelines[0];
+  state.pipelines = [{
+    id: 'pipeline_homeowner_live_accepted',
+    name: homeownerPipeline.name,
+    locationId: manifest.identity.locationId,
+    stages: homeownerPipeline.stages.map((name: string, index: number) => ({
+      id: `pipeline_homeowner_live_stage_${index}`,
+      name,
+      position: index + 1,
+      showInFunnel: true
+    }))
+  }];
 }
 
 describe('RestoreRadar guarded CRM schema apply tool', () => {
@@ -1919,6 +1955,79 @@ describe('RestoreRadar guarded CRM schema apply tool', () => {
     expect(replayMutations).toEqual([]);
   });
 
+  test('recovers the accepted homeowner pipeline without reposting it and creates the provider pipeline once with 201', async () => {
+    const server = statefulMissingSchemaServer();
+    seedLiveAcceptedHomeownerPipelineState(server);
+
+    const dryRun = mockFetch(server.router);
+    const dryRunResult = await runSchemaTool({
+      argv: requiredArgs(),
+      fetchImpl: dryRun.fetchImpl,
+      env: credentialEnv(),
+      now: () => NOW
+    });
+    expect(dryRunResult.receipt.verdict).toBe('READY');
+    expect(dryRunResult.receipt.summary.existing).toBe(21);
+    expect(dryRunResult.receipt.summary.plannedCreates).toBe(47);
+    expect(dryRun.calls.every((call) => call.method === 'GET')).toBe(true);
+
+    const recovery = mockFetch(server.router);
+    const recoveryResult = await runSchemaTool({
+      argv: requiredArgs(['--apply', '--test-suffix', TEST_SUFFIX]),
+      fetchImpl: recovery.fetchImpl,
+      env: credentialEnv(),
+      now: () => NOW
+    });
+    const mutationPosts = recovery.calls.filter((call) =>
+      call.method === 'POST' &&
+      call.url.pathname !== '/contacts/search' &&
+      !call.url.pathname.endsWith('/records/search')
+    );
+    const pipelinePosts = mutationPosts.filter((call) =>
+      call.url.pathname === '/opportunities/pipelines'
+    );
+    expect(recoveryResult.receipt.verdict).toBe('APPLIED');
+    expect(mutationPosts).toHaveLength(54);
+    expect(pipelinePosts.filter((call) =>
+      call.body.name === server.manifest.pipelines[0].name
+    )).toEqual([]);
+    expect(pipelinePosts.filter((call) =>
+      call.body.name === server.manifest.pipelines[1].name
+    )).toHaveLength(1);
+    expect(recoveryResult.receipt.requests).toContainEqual(expect.objectContaining({
+      method: 'POST',
+      path: '/opportunities/pipelines',
+      status: 201,
+      accepted2xx: true
+    }));
+    expect(recoveryResult.receipt.acceptedCreates.filter((entry: any) =>
+      entry.resource === 'pipeline'
+    )).toEqual([
+      expect.objectContaining({ key: server.manifest.pipelines[1].name, status: 201 })
+    ]);
+    expect(recoveryResult.receipt.completed.filter((entry: any) =>
+      entry.resource === 'pipeline'
+    )).toEqual([
+      expect.objectContaining({ key: server.manifest.pipelines[1].name, status: 'created' })
+    ]);
+    expect(server.state.pipelines).toHaveLength(2);
+
+    const replay = mockFetch(server.router);
+    const replayResult = await runSchemaTool({
+      argv: requiredArgs(['--apply', '--test-suffix', TEST_SUFFIX]),
+      fetchImpl: replay.fetchImpl,
+      env: credentialEnv(),
+      now: () => new Date('2036-07-08T09:10:11.000Z')
+    });
+    const replayMutations = replay.calls.filter((call) =>
+      call.method === 'POST' &&
+      call.url.pathname !== '/contacts/search' &&
+      !call.url.pathname.endsWith('/records/search')
+    );
+    expect(replayResult.receipt.verdict).toBe('APPLIED');
+    expect(replayMutations).toEqual([]);
+  });
+
   test('recovers the accepted live object without recreating it, then safely replays the same suffix', async () => {
     const server = statefulMissingSchemaServer();
     seedAcceptedLiveObject(server);
@@ -2003,7 +2112,7 @@ describe('RestoreRadar guarded CRM schema apply tool', () => {
     expect(server.state.writeLog.every((write: any) =>
       write.authorization === `Bearer ${TOKEN}`
     )).toBe(true);
-    for (const { path, status } of DOCUMENTED_CREATE_FAMILIES) {
+    for (const { path, status } of SCHEMA_CREATE_FAMILIES) {
       const requests = firstResult.receipt.requests.filter((request: any) =>
         request.method === 'POST' && request.path === path
       );
@@ -2117,8 +2226,8 @@ describe('RestoreRadar guarded CRM schema apply tool', () => {
     )).toBe(false);
   });
 
-  test.each(DOCUMENTED_CREATE_FAMILIES)(
-    'halts after one accepted $family POST when the 2xx status is not the documented status',
+  test.each(SCHEMA_CREATE_FAMILIES)(
+    'halts after one accepted $family POST when the 2xx status is not the pinned status',
     async ({ family, path, status }) => {
       const server = statefulMissingSchemaServer(0, {
         failure: { family, kind: 'wrong-status' }
@@ -2148,7 +2257,38 @@ describe('RestoreRadar guarded CRM schema apply tool', () => {
     }
   );
 
-  test.each(DOCUMENTED_CREATE_FAMILIES)(
+  test('records a pipeline HTTP 200 as accepted but uncompleted and halts before readback', async () => {
+    const server = statefulMissingSchemaServer(0, {
+      failure: { family: 'pipeline', kind: 'wrong-status' }
+    });
+    const { calls, fetchImpl } = mockFetch(server.router);
+    const result = await runSchemaTool({
+      argv: requiredArgs(['--apply', '--test-suffix', TEST_SUFFIX]),
+      fetchImpl,
+      env: credentialEnv(),
+      now: () => NOW
+    });
+    const pipelinePostIndex = calls.findIndex((call) =>
+      call.method === 'POST' && call.url.pathname === '/opportunities/pipelines'
+    );
+    expect(result.receipt.haltReason.code).toBe('UNEXPECTED_SUCCESS_STATUS');
+    expect(pipelinePostIndex).toBeGreaterThan(-1);
+    expect(calls.slice(pipelinePostIndex + 1)).toEqual([]);
+    expect(result.receipt.acceptedCreates.filter((entry: any) =>
+      entry.resource === 'pipeline'
+    )).toEqual([
+      expect.objectContaining({
+        key: server.manifest.pipelines[0].name,
+        path: '/opportunities/pipelines',
+        status: 200
+      })
+    ]);
+    expect(result.receipt.completed.some((entry: any) =>
+      entry.resource === 'pipeline'
+    )).toBe(false);
+  });
+
+  test.each(SCHEMA_CREATE_FAMILIES)(
     'halts after one accepted $family POST when the create envelope has no ID',
     async ({ family, path, status }) => {
       const server = statefulMissingSchemaServer(0, {
@@ -2177,7 +2317,7 @@ describe('RestoreRadar guarded CRM schema apply tool', () => {
     }
   );
 
-  test.each(DOCUMENTED_CREATE_FAMILIES)(
+  test.each(SCHEMA_CREATE_FAMILIES)(
     'requires $family readback to match the exact server-assigned create ID',
     async ({ family, path, status }) => {
       const server = statefulMissingSchemaServer(0, {
