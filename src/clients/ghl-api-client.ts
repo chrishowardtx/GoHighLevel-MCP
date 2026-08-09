@@ -2290,7 +2290,7 @@ export class GHLApiClient {
 
       return this.wrapResponse(response.data);
     } catch (error) {
-      throw this.handleApiError(error as AxiosError<GHLErrorResponse>);
+      throw error;
     }
   }
 
@@ -2313,7 +2313,7 @@ export class GHLApiClient {
 
       return this.wrapResponse(response.data);
     } catch (error) {
-      throw this.handleApiError(error as AxiosError<GHLErrorResponse>);
+      throw error;
     }
   }
 
@@ -2330,7 +2330,7 @@ export class GHLApiClient {
 
       return this.wrapResponse(response.data);
     } catch (error) {
-      throw this.handleApiError(error as AxiosError<GHLErrorResponse>);
+      throw error;
     }
   }
 
@@ -4452,7 +4452,7 @@ export class GHLApiClient {
 
       return this.wrapResponse(response.data);
     } catch (error) {
-      throw this.handleApiError(error as AxiosError<GHLErrorResponse>);
+      throw error;
     }
   }
 

@@ -91,4 +91,14 @@ describe('current endpoint-specific API contracts', () => {
       headers: { Version: 'v3' },
     });
   });
+
+  it('preserves endpoint status from the shared response interceptor', async () => {
+    request.get.mockRejectedValueOnce(new Error('GHL API Error (403): Forbidden resource'));
+
+    const result = client.getSnapshots();
+    await expect(result).rejects.toThrow(
+      'GHL API Error (403): Forbidden resource',
+    );
+    await expect(result).rejects.not.toThrow('GHL API Error (500)');
+  });
 });
