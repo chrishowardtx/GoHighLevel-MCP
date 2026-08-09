@@ -12,6 +12,10 @@ Durable checkout: `/Users/cjh/Projects/tools/ghl-mcp-owner`
 
 Implementation commit: `e938bba3db0281fc1fb58553062f8035142becbc`
 
+Endpoint-status follow-up: `013021ace2672ead513bc9954b63237d3cf88c2e`
+
+Pull request: https://github.com/chrishowardtx/GoHighLevel-MCP/pull/2
+
 ## WORKING NOW
 
 - The owner-controlled GitHub fork is the writable authority. The dirty checkout at
@@ -20,6 +24,8 @@ Implementation commit: `e938bba3db0281fc1fb58553062f8035142becbc`
   no live profile command has been repointed yet.
 - `getSurveySubmissions` now follows the official current contract:
   `GET /surveys/submissions`, required `locationId` query, endpoint `Version: v3`.
+- The new endpoint reads preserve the original shared-interceptor status. A live snapshots denial is
+  reported as HTTP 403 rather than being incorrectly wrapped as HTTP 500.
 - Agency mode remains locally read-only and exposes exactly six tools:
   `search_locations`, `get_location`, `agency_get_company`, `agency_search_users`,
   `agency_get_snapshots`, and `agency_capability_report`.
@@ -44,16 +50,16 @@ snapshots are implemented as harmless GET reads with endpoint-specific v3 header
 
 ## Verification receipt
 
-- Focused guardrail tests: 24 passed, 0 failed.
+- Focused guardrail tests: 25 passed, 0 failed.
 - Type check: passed (`npm run lint`).
 - Build: passed (`npm run build`).
 - Shell syntax: passed (`bash -n launcher-profile.sh`).
-- Full inherited suite: 99 passed, 42 failed, 141 total. The failure count is unchanged from the
-  pre-existing baseline (82 passed, 42 failed, 124 total); the 17 newly added tests account for the
+- Full inherited suite: 100 passed, 42 failed, 142 total. The failure count is unchanged from the
+  pre-existing baseline (82 passed, 42 failed, 124 total); the 18 newly added tests account for the
   increased pass count. The inherited stale client mocks and old tool-count assertions remain red.
 - Live harmless-read MCP probes against the durable checkout:
   - agency: startup identity matched; 6 tools; company supported; locations supported (3 visible);
-    users supported (1 visible).
+    users supported (1 visible); snapshots unsupported with the original HTTP 403 preserved.
   - NowLanded: startup location/company identity matched; 107 tools; mutation call blocked locally.
   - RestoreRadar: startup location/company identity matched; 107 tools; mutation call blocked locally.
   - Hattie: startup location/company identity matched; 107 tools; mutation call blocked locally.
@@ -84,7 +90,7 @@ snapshots are implemented as harmless GET reads with endpoint-specific v3 header
 
 ## Exact next action
 
-Push this branch and integrate it through a pull request into the owner fork. After merge, rebuild the
-durable checkout, repoint all four user-scope MCP commands to
+Review and merge pull request 2 into the owner fork. After merge, rebuild the durable checkout,
+repoint all four user-scope MCP commands to
 `/Users/cjh/Projects/tools/ghl-mcp-owner/launcher-profile.sh`, then verify agency tool/capability output
 and all three exact location identities before retiring the old worktree.
