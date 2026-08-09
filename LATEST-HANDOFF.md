@@ -1,1 +1,1 @@
-handoff/2026-08-09T034718Z__codex__four-ghl-mcp-profiles.md
+handoff/2026-08-09T091728Z__codex__ghl-mcp-hardening.md
