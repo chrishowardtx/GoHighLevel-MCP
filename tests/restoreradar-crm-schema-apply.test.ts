@@ -1,3 +1,5 @@
+const fs = require('node:fs');
+
 const {
   DEFAULT_READBACK_RETRY_DELAYS_MS,
   HighLevelClient,
@@ -292,6 +294,7 @@ function completeRouter(call: FetchCall, overrides: {
   wrongObjectLocation?: boolean;
   directObjectIdMismatch?: boolean;
   directObjectContractMismatch?: boolean;
+  v2EnvironmentOptionMismatch?: 'key' | 'label';
   primaryFieldIssue?: 'missing-id' | 'wrong-name' | 'wrong-type' | 'wrong-key';
   missingId?:
     | 'pipeline'
@@ -316,6 +319,16 @@ function completeRouter(call: FetchCall, overrides: {
     | 'business-false';
 } = {}) {
   const fixture = completeFixture();
+  if (overrides.v2EnvironmentOptionMismatch) {
+    const environmentField = fixture.customFields.find((field: any) =>
+      field.fieldKey.endsWith('.rr_environment')
+    );
+    if (overrides.v2EnvironmentOptionMismatch === 'key') {
+      environmentField.options[0].key = 'TEST';
+    } else {
+      environmentField.options[0].label = 'Test';
+    }
+  }
   if (overrides.wrongBusinessFolder) {
     const field = fixture.businessFields.find((entry: any) => entry.name.startsWith('RR |'));
     field.parentId = 'wrong_folder';
@@ -942,6 +955,41 @@ function seedAcceptedLiveObject(
   }];
 }
 
+function seedLiveNormalizedEnvironmentState(
+  server: ReturnType<typeof statefulMissingSchemaServer>
+) {
+  seedAcceptedLiveObject(server);
+  const { manifest, state } = server;
+  const folder = {
+    id: 'assignment_folder_live',
+    objectKey: manifest.customObject.key,
+    name: manifest.customObject.folder
+  };
+  const environmentIndex = manifest.customObject.fields.findIndex(
+    (field: any) => field.suffix === 'rr_environment'
+  );
+  if (environmentIndex < 0) throw new Error('RR Environment field is required by the test fixture');
+  state.customFolders = [folder];
+  state.customFields.push(
+    ...manifest.customObject.fields.slice(0, environmentIndex + 1).map(
+      (field: any, index: number) => ({
+        id: `assignment_live_field_${index}`,
+        name: field.name,
+        fieldKey: `${manifest.customObject.key}.${field.suffix}`,
+        objectKey: manifest.customObject.key,
+        parentId: folder.id,
+        dataType: field.dataType,
+        options: field.suffix === 'rr_environment'
+          ? [
+            { key: 'test', label: 'TEST' },
+            { key: 'production', label: 'PRODUCTION' }
+          ]
+          : field.options || []
+      })
+    )
+  );
+}
+
 describe('RestoreRadar guarded CRM schema apply tool', () => {
   test('keeps the default accepted-create visibility window bounded to 2.5 seconds', () => {
     expect(DEFAULT_READBACK_RETRY_DELAYS_MS).toEqual([0, 250, 750, 1500]);
@@ -949,6 +997,40 @@ describe('RestoreRadar guarded CRM schema apply tool', () => {
       (total: number, delayMs: number) => total + delayMs,
       0
     )).toBe(2500);
+  });
+
+  test('pins lowercase V2 option keys with exact RestoreRadar display labels', () => {
+    const manifest = loadManifest();
+    const businessEnvironment = manifest.business.fields.find(
+      (field: any) => field.fieldKey === 'business.rr_environment'
+    );
+    const assignmentEnvironment = manifest.customObject.fields.find(
+      (field: any) => field.suffix === 'rr_environment'
+    );
+    const assignmentState = manifest.customObject.fields.find(
+      (field: any) => field.suffix === 'rr_assignment_state'
+    );
+    const environmentOptions = [
+      { key: 'test', label: 'TEST' },
+      { key: 'production', label: 'PRODUCTION' }
+    ];
+    expect(businessEnvironment.options).toEqual(environmentOptions);
+    expect(assignmentEnvironment.options).toEqual(environmentOptions);
+    expect(assignmentState.options).toEqual([
+      { key: 'queued', label: 'Queued' },
+      { key: 'sent', label: 'Sent' },
+      { key: 'delivered', label: 'Delivered' },
+      { key: 'acknowledged', label: 'Acknowledged' },
+      { key: 'contacted', label: 'Contacted' },
+      { key: 'accepted', label: 'Accepted' },
+      { key: 'declined', label: 'Declined' },
+      { key: 'expired', label: 'Expired' }
+    ]);
+    expect(manifest.testRecords).toMatchObject({
+      legacyEnvironment: 'TEST',
+      v2EnvironmentOptionKey: 'test',
+      assignmentStateOptionKey: 'queued'
+    });
   });
 
   test('dry-run performs discovery reads and no writes', async () => {
@@ -1109,6 +1191,26 @@ describe('RestoreRadar guarded CRM schema apply tool', () => {
       now: () => NOW
     });
     expect(result.receipt.haltReason.code).toBe('SCHEMA_PLAN_HALTED');
+    expect(calls.every((call) => call.method === 'GET')).toBe(true);
+  });
+
+  test.each([
+    ['option key', 'key'],
+    ['option label', 'label']
+  ] as const)('treats a V2 Environment field with a mismatched %s as a collision', async (_label, mismatch) => {
+    const { calls, fetchImpl } = mockFetch((call) => completeRouter(call, {
+      v2EnvironmentOptionMismatch: mismatch
+    }));
+    const result = await runSchemaTool({
+      argv: requiredArgs(),
+      fetchImpl,
+      env: credentialEnv(),
+      now: () => NOW
+    });
+    expect(result.receipt.haltReason.code).toBe('SCHEMA_PLAN_HALTED');
+    expect(result.receipt.collisions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ resource: 'customObjectField', key: 'rr_environment' })
+    ]));
     expect(calls.every((call) => call.method === 'GET')).toBe(true);
   });
 
@@ -1735,6 +1837,88 @@ describe('RestoreRadar guarded CRM schema apply tool', () => {
     expect(result.receipt.summary.completedCreates).toBe(0);
   });
 
+  test('recovers the live normalized Environment field without reposting it and keeps later option writes canonical', async () => {
+    const server = statefulMissingSchemaServer();
+    seedLiveNormalizedEnvironmentState(server);
+
+    const dryRun = mockFetch(server.router);
+    const dryRunResult = await runSchemaTool({
+      argv: requiredArgs(),
+      fetchImpl: dryRun.fetchImpl,
+      env: credentialEnv(),
+      now: () => NOW
+    });
+    expect(dryRunResult.receipt.verdict).toBe('READY');
+    expect(dryRunResult.receipt.summary.existing).toBe(8);
+    expect(dryRunResult.receipt.summary.plannedCreates).toBe(60);
+    expect(dryRun.calls.every((call) => call.method === 'GET')).toBe(true);
+
+    const recovery = mockFetch(server.router);
+    const recoveryResult = await runSchemaTool({
+      argv: requiredArgs(['--apply', '--test-suffix', TEST_SUFFIX]),
+      fetchImpl: recovery.fetchImpl,
+      env: credentialEnv(),
+      now: () => NOW
+    });
+    const mutationPosts = recovery.calls.filter((call) =>
+      call.method === 'POST' &&
+      call.url.pathname !== '/contacts/search' &&
+      !call.url.pathname.endsWith('/records/search')
+    );
+    const v2FieldPosts = mutationPosts.filter((call) =>
+      call.url.pathname === '/custom-fields/'
+    );
+    const environmentKey = `${server.manifest.customObject.key}.rr_environment`;
+    expect(recoveryResult.receipt.verdict).toBe('APPLIED');
+    expect(mutationPosts).toHaveLength(67);
+    expect(v2FieldPosts.filter((call) => call.body.fieldKey === environmentKey)).toEqual([]);
+
+    const assignmentState = server.manifest.customObject.fields.find(
+      (field: any) => field.suffix === 'rr_assignment_state'
+    );
+    const assignmentStatePost = v2FieldPosts.find((call) =>
+      call.body.fieldKey === `${server.manifest.customObject.key}.rr_assignment_state`
+    );
+    expect(assignmentStatePost.body.options).toEqual(assignmentState.options);
+    const businessEnvironment = server.manifest.business.fields.find(
+      (field: any) => field.fieldKey === 'business.rr_environment'
+    );
+    const businessEnvironmentPost = v2FieldPosts.find((call) =>
+      call.body.fieldKey === 'business.rr_environment'
+    );
+    expect(businessEnvironmentPost.body.options).toEqual(businessEnvironment.options);
+    expect(v2FieldPosts.filter((call) => Array.isArray(call.body.options)).every((call) =>
+      call.body.options.every((option: any) => option.key === option.key.toLowerCase())
+    )).toBe(true);
+
+    const businessRecordPost = mutationPosts.find((call) =>
+      call.url.pathname === '/objects/business/records'
+    );
+    const assignmentRecordPost = mutationPosts.find((call) =>
+      call.url.pathname === `/objects/${server.manifest.customObject.key}/records`
+    );
+    expect(businessRecordPost.body.properties.rr_environment).toBe('test');
+    expect(assignmentRecordPost.body.properties).toMatchObject({
+      rr_environment: 'test',
+      rr_assignment_state: 'queued'
+    });
+
+    const replay = mockFetch(server.router);
+    const replayResult = await runSchemaTool({
+      argv: requiredArgs(['--apply', '--test-suffix', TEST_SUFFIX]),
+      fetchImpl: replay.fetchImpl,
+      env: credentialEnv(),
+      now: () => new Date('2035-06-07T08:09:10.000Z')
+    });
+    const replayMutations = replay.calls.filter((call) =>
+      call.method === 'POST' &&
+      call.url.pathname !== '/contacts/search' &&
+      !call.url.pathname.endsWith('/records/search')
+    );
+    expect(replayResult.receipt.verdict).toBe('APPLIED');
+    expect(replayMutations).toEqual([]);
+  });
+
   test('recovers the accepted live object without recreating it, then safely replays the same suffix', async () => {
     const server = statefulMissingSchemaServer();
     seedAcceptedLiveObject(server);
@@ -2319,14 +2503,24 @@ describe('RestoreRadar guarded CRM schema apply tool', () => {
       expect(contact).not.toHaveProperty('email');
       expect(contact).not.toHaveProperty('phone');
       expect(contact.name).toMatch(/^RR TEST /);
+      expect(contact.customFields).toContainEqual({
+        id: contactFieldIds['RR | Environment'],
+        fieldValue: 'TEST'
+      });
     }
-    expect(business.properties.rr_environment).toBe('TEST');
+    expect(business.properties.rr_environment).toBe('test');
     expect(business.properties).not.toHaveProperty('email');
     expect(business.properties).not.toHaveProperty('phone');
     expect(opportunities.homeowner.name).toMatch(/^RR TEST /);
     expect(opportunities.provider.name).toMatch(/^RR TEST /);
-    expect(assignment.properties.rr_environment).toBe('TEST');
-    expect(assignment.properties.rr_assignment_state).toBe('Queued');
+    for (const opportunity of Object.values(opportunities) as any[]) {
+      expect(opportunity.customFields).toContainEqual({
+        id: opportunityFieldIds['RR | Environment'],
+        fieldValue: 'TEST'
+      });
+    }
+    expect(assignment.properties.rr_environment).toBe('test');
+    expect(assignment.properties.rr_assignment_state).toBe('queued');
     expect(assignment.properties).not.toHaveProperty('rr_sent_at_utc');
     expect(assignment.properties).not.toHaveProperty('rr_resend_message_id');
     for (const payload of [contacts, business, opportunities, assignment]) {
@@ -2334,5 +2528,42 @@ describe('RestoreRadar guarded CRM schema apply tool', () => {
       expect(JSON.stringify(payload)).not.toMatch(/ipAddress|userAgent|rawNarrative|homeownerNarrative/);
     }
     expect(JSON.stringify({ contacts, business, opportunities, assignment })).not.toContain(TOKEN);
+  });
+
+  test.each([
+    ['V2 environment', 'v2EnvironmentOptionKey', 'production'],
+    ['assignment state', 'assignmentStateOptionKey', 'sent']
+  ])('blocks a manifest-drifted TEST %s value independently of the payload builder', async (
+    _label,
+    manifestKey,
+    unsafeValue
+  ) => {
+    const driftedManifest = JSON.parse(JSON.stringify(loadManifest()));
+    driftedManifest.testRecords[manifestKey] = unsafeValue;
+    const virtualManifestPath = '/virtual/restoreradar-option-drift.json';
+    const realReadFileSync = fs.readFileSync;
+    const readFileSpy = jest.spyOn(fs, 'readFileSync').mockImplementation(
+      (filePath: any, encoding: any) => filePath === virtualManifestPath
+        ? JSON.stringify(driftedManifest)
+        : realReadFileSync(filePath, encoding)
+    );
+    try {
+      const { calls, fetchImpl } = mockFetch(completeRouter);
+      const result = await runSchemaTool({
+        argv: requiredArgs(['--apply', '--test-suffix', TEST_SUFFIX]),
+        fetchImpl,
+        env: credentialEnv(),
+        now: () => NOW,
+        manifestPath: virtualManifestPath
+      });
+      expect(result.receipt.haltReason.code).toBe('TEST_RECORD_GUARD');
+      expect(calls.filter((call) =>
+        call.method === 'POST' &&
+        call.url.pathname !== '/contacts/search' &&
+        !call.url.pathname.endsWith('/records/search')
+      )).toEqual([]);
+    } finally {
+      readFileSpy.mockRestore();
+    }
   });
 });

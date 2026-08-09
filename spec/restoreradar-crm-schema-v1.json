@@ -106,11 +106,11 @@
         "dataType": "SINGLE_OPTIONS",
         "options": [
           {
-            "key": "TEST",
+            "key": "test",
             "label": "TEST"
           },
           {
-            "key": "PRODUCTION",
+            "key": "production",
             "label": "PRODUCTION"
           }
         ]
@@ -192,11 +192,11 @@
         "dataType": "SINGLE_OPTIONS",
         "options": [
           {
-            "key": "TEST",
+            "key": "test",
             "label": "TEST"
           },
           {
-            "key": "PRODUCTION",
+            "key": "production",
             "label": "PRODUCTION"
           }
         ]
@@ -207,35 +207,35 @@
         "dataType": "SINGLE_OPTIONS",
         "options": [
           {
-            "key": "Queued",
+            "key": "queued",
             "label": "Queued"
           },
           {
-            "key": "Sent",
+            "key": "sent",
             "label": "Sent"
           },
           {
-            "key": "Delivered",
+            "key": "delivered",
             "label": "Delivered"
           },
           {
-            "key": "Acknowledged",
+            "key": "acknowledged",
             "label": "Acknowledged"
           },
           {
-            "key": "Contacted",
+            "key": "contacted",
             "label": "Contacted"
           },
           {
-            "key": "Accepted",
+            "key": "accepted",
             "label": "Accepted"
           },
           {
-            "key": "Declined",
+            "key": "declined",
             "label": "Declined"
           },
           {
-            "key": "Expired",
+            "key": "expired",
             "label": "Expired"
           }
         ]
@@ -309,7 +309,9 @@
       "rr:test",
       "rr:schema-verification"
     ],
-    "environment": "TEST",
+    "legacyEnvironment": "TEST",
+    "v2EnvironmentOptionKey": "test",
+    "assignmentStateOptionKey": "queued",
     "consentStatus": "NOT_GRANTED",
     "projectionVersion": "rr-ghl-crm-schema/v1"
   },

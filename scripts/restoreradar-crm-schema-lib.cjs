@@ -1288,7 +1288,7 @@ function buildContactPayloads({ manifest, suffix, fieldIds }) {
       name: ids.homeownerName,
       customFields: customValues(fieldIds, {
         'RR | Homeowner External ID': ids.homeownerExternalId,
-        'RR | Environment': manifest.testRecords.environment,
+        'RR | Environment': manifest.testRecords.legacyEnvironment,
         'RR | Consent Status': manifest.testRecords.consentStatus,
         'RR | Consent Version': 'NOT_APPLICABLE',
         'RR | Source Event ID': ids.sourceEventId,
@@ -1299,7 +1299,7 @@ function buildContactPayloads({ manifest, suffix, fieldIds }) {
       ...shared,
       name: ids.providerName,
       customFields: customValues(fieldIds, {
-        'RR | Environment': manifest.testRecords.environment,
+        'RR | Environment': manifest.testRecords.legacyEnvironment,
         'RR | Consent Status': manifest.testRecords.consentStatus,
         'RR | Consent Version': 'NOT_APPLICABLE',
         'RR | Source Event ID': ids.sourceEventId,
@@ -1317,7 +1317,7 @@ function buildBusinessRecordPayload({ manifest, suffix }) {
       name: ids.businessName,
       rr_external_provider_id: ids.providerExternalId,
       rr_provider_slug: `rr-test-provider-${suffix.toLowerCase()}`,
-      rr_environment: manifest.testRecords.environment,
+      rr_environment: manifest.testRecords.v2EnvironmentOptionKey,
       rr_source_event_id: ids.sourceEventId,
       rr_projection_version: manifest.testRecords.projectionVersion
     }
@@ -1350,7 +1350,7 @@ function buildOpportunityPayloads({
       contactId: homeownerContactId,
       customFields: customValues(fieldIds, {
         'RR | Request External ID': ids.requestExternalId,
-        'RR | Environment': manifest.testRecords.environment,
+        'RR | Environment': manifest.testRecords.legacyEnvironment,
         'RR | Request Service': 'TEST_ONLY',
         'RR | Request City': 'TEST_ONLY',
         'RR | Request ZIP': '00000',
@@ -1386,7 +1386,7 @@ function buildOpportunityPayloads({
       customFields: customValues(fieldIds, {
         'RR | Provider External ID': ids.providerExternalId,
         'RR | GHL Business ID': businessId,
-        'RR | Environment': manifest.testRecords.environment,
+        'RR | Environment': manifest.testRecords.legacyEnvironment,
         'RR | Source Event ID': ids.sourceEventId,
         'RR | Source Recorded At UTC': nowIso,
         'RR | Projection Version': manifest.testRecords.projectionVersion
@@ -1413,8 +1413,8 @@ function buildAssignmentRecordPayload({
       rr_ghl_contact_id: homeownerContactId,
       rr_ghl_opportunity_id: homeownerOpportunityId,
       rr_ghl_business_id: businessId,
-      rr_environment: manifest.testRecords.environment,
-      rr_assignment_state: 'Queued',
+      rr_environment: manifest.testRecords.v2EnvironmentOptionKey,
+      rr_assignment_state: manifest.testRecords.assignmentStateOptionKey,
       rr_source_event_id: ids.sourceEventId,
       rr_projection_version: manifest.testRecords.projectionVersion,
       rr_queued_at_utc: nowIso
@@ -1628,8 +1628,14 @@ function safeBusinessReadback(record, expected, manifest) {
 
 async function ensureTestBusiness(client, manifest, receipt, name, payload) {
   assertNoProhibitedPayloadData(payload, manifest);
-  if (!name.startsWith('RR TEST ') || payload.properties?.rr_environment !== 'TEST') {
-    throw new GuardError('TEST_RECORD_GUARD', 'TEST business must be unmistakably named and marked TEST');
+  if (
+    !name.startsWith('RR TEST ') ||
+    payload.properties?.rr_environment !== 'test'
+  ) {
+    throw new GuardError(
+      'TEST_RECORD_GUARD',
+      'TEST business must be unmistakably named and use the canonical TEST option key'
+    );
   }
   if ('email' in payload.properties || 'phone' in payload.properties) {
     throw new GuardError('TEST_RECORD_GUARD', 'TEST business must not contain communication channels');
@@ -1761,10 +1767,13 @@ async function ensureTestAssignment(client, manifest, receipt, externalId, paylo
   assertNoProhibitedPayloadData(payload, manifest);
   if (
     !externalId.startsWith('rr_test_assignment_') ||
-    payload.properties?.rr_environment !== 'TEST' ||
-    payload.properties?.rr_assignment_state !== 'Queued'
+    payload.properties?.rr_environment !== 'test' ||
+    payload.properties?.rr_assignment_state !== 'queued'
   ) {
-    throw new GuardError('TEST_RECORD_GUARD', 'Assignment verification record must be TEST and Queued');
+    throw new GuardError(
+      'TEST_RECORD_GUARD',
+      'Assignment verification record must use the canonical TEST and Queued option keys'
+    );
   }
   const query = `rr_assignment_id:${externalId}`;
   let records = await searchObjectRecord(
