@@ -15,9 +15,7 @@ const AGENCY_READ_ENDPOINTS = [
   ['GET', /^\/companies\/[^/]+$/]
 ];
 
-const AGENCY_MUTATION_ENDPOINTS = [
-  ['POST', /^\/objects\/$/]
-];
+const AGENCY_MUTATION_ENDPOINTS = [];
 
 const LOCATION_READ_ENDPOINTS = [
   ['GET', /^\/locations\/[^/]+$/],
@@ -39,6 +37,7 @@ const LOCATION_READ_ENDPOINTS = [
 ];
 
 const LOCATION_MUTATION_ENDPOINTS = [
+  ['POST', /^\/objects\/$/],
   ['POST', /^\/opportunities\/pipelines$/],
   ['POST', /^\/locations\/[^/]+\/customFields$/],
   ['POST', /^\/custom-fields\/folder$/],
@@ -1038,15 +1037,15 @@ function exactCreatedCustomObject(object, manifest) {
     object.primaryDisplayProperty === manifest.customObject.primaryDisplayPropertyDetails.key;
 }
 
-async function ensureCustomObject(agencyClient, locationClient, manifest, receipt) {
-  let objects = await readObjects(locationClient, manifest, receipt);
+async function ensureCustomObject(client, manifest, receipt) {
+  let objects = await readObjects(client, manifest, receipt);
   let result = requireNoCollision(findObject(
     objects,
     manifest.customObject,
     manifest.identity.locationId
   ));
   if (result.state === 'exact') return result.value;
-  const response = await agencyClient.request('POST', '/objects/', {
+  const response = await client.request('POST', '/objects/', {
     mutating: true,
     expectedStatus: 201,
     receiptResource: 'customObject',
@@ -1068,13 +1067,13 @@ async function ensureCustomObject(agencyClient, locationClient, manifest, receip
   if (!exactCreatedCustomObject(created, manifest)) {
     throw new GuardError(
       'MALFORMED_OBJECT_CREATE_RESPONSE',
-      'Agency object create response did not exactly match the requested RestoreRadar object'
+      'Custom object create response did not exactly match the requested RestoreRadar object'
     );
   }
   for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
       const details = await readObjectDetails(
-        locationClient,
+        client,
         manifest,
         receipt,
         manifest.customObject.key
@@ -1136,13 +1135,8 @@ async function ensureAssociation(client, manifest, receipt) {
   return result.value;
 }
 
-async function applySchema(agencyClient, locationClient, manifest, receipt) {
-  const customObject = await ensureCustomObject(
-    agencyClient,
-    locationClient,
-    manifest,
-    receipt
-  );
+async function applySchema(locationClient, manifest, receipt) {
+  const customObject = await ensureCustomObject(locationClient, manifest, receipt);
   if (customObject.key !== manifest.customObject.key) {
     throw new GuardError('CUSTOM_OBJECT_KEY_MISMATCH', 'Server returned an unexpected custom-object key');
   }
@@ -2128,7 +2122,7 @@ async function runSchemaTool({
       return { receipt, exitCode: 0 };
     }
 
-    await applySchema(agencyClient, locationClient, manifest, receipt);
+    await applySchema(locationClient, manifest, receipt);
     const finalDiscovery = await discoverSchema(locationClient, manifest, receipt);
     const finalPlan = planSchema(manifest, finalDiscovery);
     if (

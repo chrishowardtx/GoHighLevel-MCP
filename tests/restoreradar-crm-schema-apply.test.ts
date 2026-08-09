@@ -1228,7 +1228,7 @@ describe('RestoreRadar guarded CRM schema apply tool', () => {
       companyId: manifest.identity.companyId,
       role: 'agency'
     });
-    await agencyClient.request('POST', '/objects/', {
+    await client.request('POST', '/objects/', {
       mutating: true,
       expectedStatus: 201,
       body: { locationId: manifest.identity.locationId }
@@ -1256,6 +1256,12 @@ describe('RestoreRadar guarded CRM schema apply tool', () => {
     expect(calls.every((call) => call.url.origin === 'https://services.leadconnectorhq.com')).toBe(true);
     expect(calls.every((call) => call.headers.Version === 'v3')).toBe(true);
     expect(calls.every((call) => call.method === 'POST')).toBe(true);
+    expect(calls.every((call) => call.headers.Authorization === `Bearer ${TOKEN}`)).toBe(true);
+    await expect(agencyClient.request('POST', '/objects/', {
+      mutating: true,
+      body: { locationId: manifest.identity.locationId }
+    })).rejects.toMatchObject({ code: 'MUTATION_ENDPOINT_NOT_ALLOWLISTED' });
+    expect(calls).toHaveLength(endpoints.length + 1);
   });
 
   test('communication, workflow, snapshot, update, and delete endpoints are unreachable', async () => {
@@ -1323,7 +1329,7 @@ describe('RestoreRadar guarded CRM schema apply tool', () => {
     };
     const agency = new HighLevelClient({ ...shared, token: AGENCY_TOKEN, role: 'agency' });
     const location = new HighLevelClient({ ...shared, token: TOKEN, role: 'location' });
-    await expect(location.request('POST', '/objects/', {
+    await expect(agency.request('POST', '/objects/', {
       mutating: true,
       body: { locationId: manifest.identity.locationId }
     })).rejects.toMatchObject({ code: 'MUTATION_ENDPOINT_NOT_ALLOWLISTED' });
@@ -1436,6 +1442,33 @@ describe('RestoreRadar guarded CRM schema apply tool', () => {
     expect(calls.every((call) => call.method === 'GET')).toBe(true);
   });
 
+  test('mismatched location credential fails its identity preflight before any POST', async () => {
+    const manifest = loadManifest();
+    const { calls, fetchImpl } = mockFetch((call) => {
+      if (call.url.pathname === `/locations/${manifest.identity.locationId}`) {
+        return jsonResponse({
+          location: {
+            id: 'wrong-location',
+            companyId: manifest.identity.companyId
+          }
+        });
+      }
+      return emptyDiscoveryRouter(call);
+    });
+    const result = await runSchemaTool({
+      argv: requiredArgs(['--apply', '--test-suffix', TEST_SUFFIX]),
+      fetchImpl,
+      env: credentialEnv(),
+      now: () => NOW
+    });
+    expect(result.receipt.haltReason.code).toBe('TOKEN_LOCATION_IDENTITY_MISMATCH');
+    expect(calls.map((call) => call.url.pathname)).toEqual([
+      `/companies/${manifest.identity.companyId}`,
+      `/locations/${manifest.identity.locationId}`
+    ]);
+    expect(calls.every((call) => call.method === 'GET')).toBe(true);
+  });
+
   test('object create is the first POST and malformed 201 response halts bulk creates', async () => {
     const manifest = loadManifest();
     const { calls, fetchImpl } = mockFetch((call) => {
@@ -1453,12 +1486,47 @@ describe('RestoreRadar guarded CRM schema apply tool', () => {
     const posts = calls.filter((call) => call.method === 'POST');
     expect(posts).toHaveLength(1);
     expect(posts[0].url.pathname).toBe('/objects/');
-    expect(posts[0].headers.Authorization).toBe(`Bearer ${AGENCY_TOKEN}`);
+    expect(posts[0].headers.Authorization).toBe(`Bearer ${TOKEN}`);
     expect(result.receipt.haltReason.code).toBe('MALFORMED_OBJECT_CREATE_RESPONSE');
     expect(result.receipt.acceptedCreates).toEqual([
-      expect.objectContaining({ path: '/objects/', status: 201, credentialRole: 'agency' })
+      expect.objectContaining({ path: '/objects/', status: 201, credentialRole: 'location' })
     ]);
     expect(result.receipt.completed).toEqual([]);
+  });
+
+  test('records the live 401 regression on the first location-scoped object POST without accepting a create', async () => {
+    const { calls, fetchImpl } = mockFetch((call) => {
+      if (call.method === 'POST' && call.url.pathname === '/objects/') {
+        return jsonResponse({ message: 'Unauthorized' }, 401);
+      }
+      return emptyDiscoveryRouter(call);
+    });
+    const result = await runSchemaTool({
+      argv: requiredArgs(['--apply', '--test-suffix', TEST_SUFFIX]),
+      fetchImpl,
+      env: credentialEnv(),
+      now: () => NOW
+    });
+    const posts = calls.filter((call) => call.method === 'POST');
+    expect(result.exitCode).toBe(2);
+    expect(result.receipt.verdict).toBe('HALTED');
+    expect(result.receipt.haltReason.code).toBe('API_ERROR');
+    expect(posts).toHaveLength(1);
+    expect(posts[0].url.pathname).toBe('/objects/');
+    expect(posts[0].headers.Authorization).toBe(`Bearer ${TOKEN}`);
+    expect(result.receipt.requests).toContainEqual(expect.objectContaining({
+      method: 'POST',
+      path: '/objects/',
+      status: 401,
+      accepted2xx: false,
+      credentialRole: 'location'
+    }));
+    expect(result.receipt.acceptedCreates).toEqual([]);
+    expect(result.receipt.completed).toEqual([]);
+    expect(result.receipt.summary.acceptedCreates).toBe(0);
+    expect(result.receipt.summary.completedCreates).toBe(0);
+    expect(JSON.stringify(result.receipt)).not.toContain(TOKEN);
+    expect(JSON.stringify(result.receipt)).not.toContain(AGENCY_TOKEN);
   });
 
   test('object create accepted but permanently unverified makes one POST then read-only retries', async () => {
@@ -1481,7 +1549,7 @@ describe('RestoreRadar guarded CRM schema apply tool', () => {
       call.method === 'GET' && call.url.pathname === `/objects/${server.manifest.customObject.key}`
     )).toHaveLength(3);
     expect(result.receipt.acceptedCreates).toEqual([
-      expect.objectContaining({ path: '/objects/', status: 201, credentialRole: 'agency' })
+      expect.objectContaining({ path: '/objects/', status: 201, credentialRole: 'location' })
     ]);
     expect(result.receipt.summary.acceptedCreates).toBe(1);
     expect(result.receipt.completed).toEqual([]);
@@ -1511,8 +1579,7 @@ describe('RestoreRadar guarded CRM schema apply tool', () => {
     expect(firstResult.receipt.summary.acceptedCreates).toBe(75);
     expect(firstResult.receipt.summary.completedCreates).toBe(75);
     expect(firstMutationPosts[0].url.pathname).toBe('/objects/');
-    expect(server.state.writeLog[0].authorization).toBe(`Bearer ${AGENCY_TOKEN}`);
-    expect(server.state.writeLog.slice(1).every((write: any) =>
+    expect(server.state.writeLog.every((write: any) =>
       write.authorization === `Bearer ${TOKEN}`
     )).toBe(true);
     for (const { path, status } of DOCUMENTED_CREATE_FAMILIES) {

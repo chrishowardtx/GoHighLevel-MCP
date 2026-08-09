@@ -18,12 +18,12 @@ the wall clock, so the same suffix remains identical across later retries.
 Dry-run never searches or creates TEST records; its receipt records both facts
 explicitly even when a suffix was supplied for preview purposes.
 
-Two credentials are independently required: `GHL_AGENCY_API_KEY` for the
-agency company preflight and custom-object schema create, and
-`GHL_RESTORERADAR_API_KEY` for the RestoreRadar location preflight plus every
-location read/create. Both identities and all discovery reads must succeed
-before the first POST. The custom-object schema POST is deliberately first so
-an agency-scope failure cannot follow a batch of location creates.
+Two credentials are independently required: `GHL_AGENCY_API_KEY` only for the
+read-only agency company preflight, and `GHL_RESTORERADAR_API_KEY` for the
+RestoreRadar location preflight plus every schema read/create, including
+`POST /objects/`. Both identities and all discovery reads must succeed before
+the first POST. The custom-object schema POST is deliberately first so a
+Sub-Account scope failure cannot follow a batch of later location creates.
 
 ## Create-only surface
 
@@ -94,8 +94,9 @@ RR object namespace, and a field key equal to that object key plus
 `.rr_assignment_id`. A suffix-only, unnamed, untyped, ID-less, or conflicting
 field is not namespace evidence.
 
-The agency credential may call only company identity GET and custom-object
-schema POST. The location credential handles all other reads and creates.
+The agency credential may call only the company identity GET; every mutation is
+locally blocked for that role. The location credential handles all remaining
+reads and every create, including custom-object schema POST.
 Protocol-relative paths, alternate origins, cross-company/location payloads,
 and role-crossing endpoints are rejected before network dispatch. A successful
 object schema create must be HTTP 201 with the exact server object ID, location,
@@ -153,8 +154,9 @@ Pipelines, legacy fields, custom objects, associations, V2 folders, and V2
 fields are never considered exact without nonempty server IDs. After apply,
 the receipt replaces planned-create actions with the final all-existing
 readback plan. The stateful verification contract expects exactly 75 additive
-creates from an empty RestoreRadar schema; the custom object is first under the
-agency credential and every later create uses the location credential.
+creates from an empty RestoreRadar schema; the custom object is first and every
+create uses the location credential. A replay of that exact state performs zero
+mutations.
 
 An existing custom object is exact only when it is explicitly non-standard
 (`standard: false`), belongs to the pinned RestoreRadar location, and matches
@@ -172,6 +174,13 @@ accepted mutation without overstating how many resources were verified. The
 summary carries separate `acceptedCreates` and `completedCreates` counts, and
 `testVerification.recordsWritten` becomes true as soon as a TEST create is
 accepted.
+
+A non-2xx mutation is recorded in `requests` with its HTTP status,
+`accepted2xx: false`, and the credential role, but it is never added to
+`acceptedCreates` or `completed`. In particular, a 401 from the first
+location-scoped `POST /objects/` halts immediately with zero accepted and zero
+completed creates; no later POST is attempted and no credential value enters
+the receipt.
 
 Once the final schema readback is exact, the receipt replaces the preliminary
 plan and its summary before any TEST write begins. A later partial TEST halt
