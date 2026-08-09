@@ -530,6 +530,21 @@ function findLegacyField(fields, model, name) {
   return { state: 'exact', value: matches[0] };
 }
 
+function exactCustomObjectContract(object, expected, locationId) {
+  const standardIsCompatible = object?.standard === false ||
+    object?.standard === null ||
+    object?.standard === undefined;
+  return Boolean(object?.id) &&
+    standardIsCompatible &&
+    String(object?.key || '').startsWith('custom_objects.') &&
+    object.locationId === locationId &&
+    object.key === expected.key &&
+    object.labels?.singular === expected.labels.singular &&
+    object.labels?.plural === expected.labels.plural &&
+    object.description === expected.description &&
+    object.primaryDisplayProperty === expected.primaryDisplayPropertyDetails.key;
+}
+
 function findObject(objects, expected, locationId) {
   const matches = objects.filter((object) =>
     object?.key === expected.key ||
@@ -538,14 +553,7 @@ function findObject(objects, expected, locationId) {
   );
   if (!matches.length) return { state: 'missing' };
   const object = matches[0];
-  const exact = matches.length === 1 && Boolean(object?.id) &&
-    object.standard === false &&
-    object.locationId === locationId &&
-    object.key === expected.key &&
-    object.labels?.singular === expected.labels.singular &&
-    object.labels?.plural === expected.labels.plural &&
-    object.description === expected.description &&
-    object.primaryDisplayProperty === expected.primaryDisplayPropertyDetails.key;
+  const exact = matches.length === 1 && exactCustomObjectContract(object, expected, locationId);
   if (!exact) return { state: 'collision', reason: `Custom object ${expected.key} is incompatible` };
   return { state: 'exact', value: object };
 }
@@ -1027,14 +1035,11 @@ async function ensureV2Field(
 }
 
 function exactCreatedCustomObject(object, manifest) {
-  return Boolean(object?.id) &&
-    object.standard === false &&
-    object.locationId === manifest.identity.locationId &&
-    object.key === manifest.customObject.key &&
-    object.labels?.singular === manifest.customObject.labels.singular &&
-    object.labels?.plural === manifest.customObject.labels.plural &&
-    object.description === manifest.customObject.description &&
-    object.primaryDisplayProperty === manifest.customObject.primaryDisplayPropertyDetails.key;
+  return exactCustomObjectContract(
+    object,
+    manifest.customObject,
+    manifest.identity.locationId
+  );
 }
 
 async function ensureCustomObject(client, manifest, receipt) {
