@@ -1608,6 +1608,39 @@ export interface GHLLocationDetailsResponse {
   location: GHLLocationDetailed;
 }
 
+// Agency inventory responses (current v3 read-only endpoints)
+export interface GHLCompany {
+  id: string;
+  name?: string;
+  [key: string]: unknown;
+}
+
+export interface GHLCompanyResponse {
+  company: GHLCompany;
+}
+
+export interface GHLAgencyUser {
+  id?: string;
+  name?: string;
+  email?: string;
+  [key: string]: unknown;
+}
+
+export interface GHLUsersSearchResponse {
+  users: GHLAgencyUser[];
+  total?: number;
+}
+
+export interface GHLSnapshot {
+  id?: string;
+  name?: string;
+  [key: string]: unknown;
+}
+
+export interface GHLSnapshotsResponse {
+  snapshots: GHLSnapshot[];
+}
+
 // Create Location Request
 export interface GHLCreateLocationRequest {
   name: string;

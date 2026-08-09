@@ -23,12 +23,14 @@ import {
   executeAgencyTool,
   getAgencyToolDefinitions,
   testAgencyConnection,
+  type AgencyConfig,
 } from './agency-mode.js';
 
 class GHLAgencyMCPServer {
   private readonly server: Server;
   private readonly ghlClient: GHLApiClient;
   private readonly locationTools: LocationTools;
+  private readonly agencyConfig: AgencyConfig;
 
   constructor() {
     this.server = new Server(
@@ -36,7 +38,8 @@ class GHLAgencyMCPServer {
       { capabilities: { tools: {} } },
     );
 
-    this.ghlClient = new GHLApiClient(createAgencyConfig());
+    this.agencyConfig = createAgencyConfig();
+    this.ghlClient = new GHLApiClient(this.agencyConfig.apiConfig);
     this.locationTools = new LocationTools(this.ghlClient);
     this.setupHandlers();
   }
@@ -50,7 +53,13 @@ class GHLAgencyMCPServer {
       const { name, arguments: args } = request.params;
 
       try {
-        const result = await executeAgencyTool(this.locationTools, name, args || {});
+        const result = await executeAgencyTool(
+          this.locationTools,
+          this.ghlClient,
+          this.agencyConfig.companyId,
+          name,
+          args || {},
+        );
         return {
           content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
         };
@@ -65,15 +74,15 @@ class GHLAgencyMCPServer {
   }
 
   async start(): Promise<void> {
-    process.stderr.write('[GHL Agency MCP] Testing agency location access...\n');
-    const visibleLocationCount = await testAgencyConnection(this.ghlClient);
+    process.stderr.write('[GHL Agency MCP] Verifying agency company identity...\n');
+    await testAgencyConnection(this.ghlClient, this.agencyConfig.companyId);
     process.stderr.write(
-      `[GHL Agency MCP] Agency access confirmed (${visibleLocationCount} location returned by startup probe).\n`,
+      '[GHL Agency MCP] Agency company identity confirmed.\n',
     );
 
     const transport = new StdioServerTransport();
     await this.server.connect(transport);
-    process.stderr.write('[GHL Agency MCP] Ready with 2 read-only tools.\n');
+    process.stderr.write('[GHL Agency MCP] Ready with 6 read-only tools.\n');
   }
 }
 
