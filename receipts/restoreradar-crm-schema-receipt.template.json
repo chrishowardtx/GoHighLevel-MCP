@@ -30,10 +30,12 @@
   "summary": {
     "existing": 0,
     "plannedCreates": 0,
+    "acceptedCreates": 0,
     "completedCreates": 0,
     "collisions": 0
   },
   "actions": [],
+  "acceptedCreates": [],
   "completed": [],
   "collisions": [],
   "blockers": [],

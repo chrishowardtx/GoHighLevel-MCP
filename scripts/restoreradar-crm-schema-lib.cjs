@@ -217,7 +217,14 @@ class HighLevelClient {
     this.role = role;
   }
 
-  async request(method, endpoint, { query, body, mutating = false, expectedStatus } = {}) {
+  async request(method, endpoint, {
+    query,
+    body,
+    mutating = false,
+    expectedStatus,
+    receiptResource,
+    receiptKey
+  } = {}) {
     method = method.toUpperCase();
     if (!/^\/[^/]/.test(endpoint)) {
       throw new GuardError('ENDPOINT_NOT_RELATIVE', 'HighLevel endpoint must be a relative path');
@@ -288,7 +295,8 @@ class HighLevelClient {
       version: API_VERSION,
       credentialRole: this.role,
       semantic: mutating ? 'create' : 'read',
-      status: null
+      status: null,
+      accepted2xx: null
     };
     this.receipt.requests.push(requestReceipt);
 
@@ -310,7 +318,22 @@ class HighLevelClient {
     }
 
     requestReceipt.status = response.status;
+    requestReceipt.accepted2xx = response.ok;
     if (!response.ok) throw new ApiError(response.status, method, pathname);
+    if (mutating) {
+      this.receipt.acceptedCreates.push({
+        resource: receiptResource || 'unclassifiedCreate',
+        key: receiptKey || null,
+        method,
+        path: pathname,
+        status: response.status,
+        credentialRole: this.role
+      });
+      this.receipt.summary.acceptedCreates = this.receipt.acceptedCreates.length;
+      if (typeof receiptResource === 'string' && receiptResource.startsWith('test')) {
+        this.receipt.testVerification.recordsWritten = true;
+      }
+    }
     if (expectedStatus !== undefined && response.status !== expectedStatus) {
       throw new GuardError(
         'UNEXPECTED_SUCCESS_STATUS',
@@ -508,7 +531,7 @@ function findLegacyField(fields, model, name) {
   return { state: 'exact', value: matches[0] };
 }
 
-function findObject(objects, expected) {
+function findObject(objects, expected, locationId) {
   const matches = objects.filter((object) =>
     object?.key === expected.key ||
     object?.labels?.singular === expected.labels.singular ||
@@ -517,6 +540,8 @@ function findObject(objects, expected) {
   if (!matches.length) return { state: 'missing' };
   const object = matches[0];
   const exact = matches.length === 1 && Boolean(object?.id) &&
+    object.standard === false &&
+    object.locationId === locationId &&
     object.key === expected.key &&
     object.labels?.singular === expected.labels.singular &&
     object.labels?.plural === expected.labels.plural &&
@@ -623,7 +648,7 @@ async function discoverSchema(client, manifest, receipt) {
   const objects = await readObjects(client, manifest, receipt);
   const businessV2 = await readV2Fields(client, manifest, receipt, manifest.business.objectKey);
   const associations = await readAssociations(client, manifest, receipt);
-  const objectMatch = findObject(objects, manifest.customObject);
+  const objectMatch = findObject(objects, manifest.customObject, manifest.identity.locationId);
   let customV2 = { fields: [], folders: [] };
   let objectDetails = null;
   let customV2Namespace = { state: 'unknown' };
@@ -837,14 +862,17 @@ async function ensurePipeline(client, manifest, receipt, expected) {
   if (result.state === 'exact') return result.value;
   const created = requireCreatedResource(await client.request('POST', '/opportunities/pipelines', {
     mutating: true,
+    expectedStatus: 200,
+    receiptResource: 'pipeline',
+    receiptKey: expected.name,
     body: pipelinePayload(manifest, expected)
-  }), ['pipeline', 'data.pipeline'], 'pipeline', receipt);
-  recordCompletedCreate(receipt, 'pipeline', expected.name, '/opportunities/pipelines');
+  }), ['pipeline', 'data.pipeline', '$'], 'pipeline', receipt);
   result = requireNoCollision(findPipeline(await readPipelines(client, manifest, receipt), expected));
   if (result.state !== 'exact') {
     throw new GuardError('CREATE_READBACK_FAILED', `Pipeline ${expected.name} was not confirmed after create`);
   }
   requireMatchingCreatedId(created, result.value, `Pipeline ${expected.name}`);
+  recordCompletedCreate(receipt, 'pipeline', expected.name, '/opportunities/pipelines');
   return result.value;
 }
 
@@ -855,15 +883,18 @@ async function ensureLegacyField(client, manifest, receipt, model, name) {
   const endpoint = `/locations/${encodeURIComponent(manifest.identity.locationId)}/customFields`;
   const created = requireCreatedResource(await client.request('POST', endpoint, {
     mutating: true,
+    expectedStatus: 201,
+    receiptResource: `${model}Field`,
+    receiptKey: name,
     body: { name, dataType: 'TEXT', model }
   }), ['customField', 'data.customField'], `${model} field`, receipt);
-  recordCompletedCreate(receipt, `${model}Field`, name, endpoint);
   fields = await readLegacyFields(client, manifest, receipt, model);
   result = requireNoCollision(findLegacyField(fields, model, name));
   if (result.state !== 'exact') {
     throw new GuardError('CREATE_READBACK_FAILED', `${model} field ${name} was not confirmed after create`);
   }
   requireMatchingCreatedId(created, result.value, `${model} field ${name}`);
+  recordCompletedCreate(receipt, `${model}Field`, name, endpoint);
   return result.value;
 }
 
@@ -873,15 +904,18 @@ async function ensureFolder(client, manifest, receipt, schemaKey, writeObjectKey
   if (result.state === 'exact') return result.value;
   const created = requireCreatedResource(await client.request('POST', '/custom-fields/folder', {
     mutating: true,
+    expectedStatus: 201,
+    receiptResource: 'customFieldFolder',
+    receiptKey: `${writeObjectKey}:${name}`,
     body: { objectKey: writeObjectKey, name, locationId: manifest.identity.locationId }
-  }), ['folder', 'data.folder'], 'custom field folder', receipt);
-  recordCompletedCreate(receipt, 'customFieldFolder', `${writeObjectKey}:${name}`, '/custom-fields/folder');
+  }), ['folder', 'data.folder', '$'], 'custom field folder', receipt);
   current = await readV2Fields(client, manifest, receipt, schemaKey);
   result = requireNoCollision(findFolder(current.folders, writeObjectKey, name));
   if (result.state !== 'exact') {
     throw new GuardError('CREATE_READBACK_FAILED', `Folder ${name} for ${writeObjectKey} was not confirmed`);
   }
   requireMatchingCreatedId(created, result.value, `Folder ${name}`);
+  recordCompletedCreate(receipt, 'customFieldFolder', `${writeObjectKey}:${name}`, '/custom-fields/folder');
   return result.value;
 }
 
@@ -905,6 +939,9 @@ async function ensureV2Field(
   if (result.state === 'exact') return result.value;
   const created = requireCreatedResource(await client.request('POST', '/custom-fields/', {
     mutating: true,
+    expectedStatus: 201,
+    receiptResource: 'customField',
+    receiptKey: fieldKey,
     body: {
       locationId: manifest.identity.locationId,
       name: expected.name,
@@ -916,7 +953,6 @@ async function ensureV2Field(
       parentId: folderId
     }
   }), ['field', 'customField', 'data.field', 'data.customField'], 'custom field', receipt);
-  recordCompletedCreate(receipt, 'customField', fieldKey, '/custom-fields/');
   current = await readV2Fields(client, manifest, receipt, schemaKey);
   result = requireNoCollision(findV2Field(current.fields, expected, {
     bySuffix,
@@ -927,6 +963,7 @@ async function ensureV2Field(
     throw new GuardError('CREATE_READBACK_FAILED', `V2 field ${expected.name} was not confirmed`);
   }
   requireMatchingCreatedId(created, result.value, `V2 field ${expected.name}`);
+  recordCompletedCreate(receipt, 'customField', fieldKey, '/custom-fields/');
   return result.value;
 }
 
@@ -943,11 +980,17 @@ function exactCreatedCustomObject(object, manifest) {
 
 async function ensureCustomObject(agencyClient, locationClient, manifest, receipt) {
   let objects = await readObjects(locationClient, manifest, receipt);
-  let result = requireNoCollision(findObject(objects, manifest.customObject));
+  let result = requireNoCollision(findObject(
+    objects,
+    manifest.customObject,
+    manifest.identity.locationId
+  ));
   if (result.state === 'exact') return result.value;
   const response = await agencyClient.request('POST', '/objects/', {
     mutating: true,
     expectedStatus: 201,
+    receiptResource: 'customObject',
+    receiptKey: manifest.customObject.key,
     body: {
       labels: manifest.customObject.labels,
       key: manifest.customObject.key,
@@ -968,7 +1011,6 @@ async function ensureCustomObject(agencyClient, locationClient, manifest, receip
       'Agency object create response did not exactly match the requested RestoreRadar object'
     );
   }
-  recordCompletedCreate(receipt, 'customObject', manifest.customObject.key, '/objects/');
   for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
       const details = await readObjectDetails(
@@ -977,7 +1019,11 @@ async function ensureCustomObject(agencyClient, locationClient, manifest, receip
         receipt,
         manifest.customObject.key
       );
-      const direct = requireNoCollision(findObject([details.object], manifest.customObject));
+      const direct = requireNoCollision(findObject(
+        [details.object],
+        manifest.customObject,
+        manifest.identity.locationId
+      ));
       if (direct.state !== 'exact' || !exactCreatedCustomObject(details.object, manifest)) {
         throw new GuardError(
           'CREATE_READBACK_FAILED',
@@ -985,6 +1031,7 @@ async function ensureCustomObject(agencyClient, locationClient, manifest, receip
         );
       }
       requireMatchingCreatedId(created, details.object, 'Custom object');
+      recordCompletedCreate(receipt, 'customObject', manifest.customObject.key, '/objects/');
       return details.object;
     } catch (error) {
       if (!(error instanceof ApiError) || error.status !== 404) throw error;
@@ -1014,15 +1061,18 @@ async function ensureAssociation(client, manifest, receipt) {
   if (result.state === 'exact') return result.value;
   const created = requireCreatedResource(await client.request('POST', '/associations/', {
     mutating: true,
+    expectedStatus: 201,
+    receiptResource: 'association',
+    receiptKey: manifest.association.key,
     body: { locationId: manifest.identity.locationId, ...manifest.association }
-  }), ['association', 'data.association'], 'association', receipt);
-  recordCompletedCreate(receipt, 'association', manifest.association.key, '/associations/');
+  }), ['association', 'data.association', '$'], 'association', receipt);
   associations = await readAssociations(client, manifest, receipt);
   result = requireNoCollision(findAssociation(associations, manifest.association));
   if (result.state !== 'exact') {
     throw new GuardError('CREATE_READBACK_FAILED', 'Association was not confirmed after create');
   }
   requireMatchingCreatedId(created, result.value, 'Association');
+  recordCompletedCreate(receipt, 'association', manifest.association.key, '/associations/');
   return result.value;
 }
 
@@ -1368,17 +1418,22 @@ async function ensureTestContact(client, manifest, receipt, name, payload) {
     return readback;
   }
   const created = requireCreatedResource(
-    await client.request('POST', '/contacts/', { mutating: true, body: payload }),
+    await client.request('POST', '/contacts/', {
+      mutating: true,
+      receiptResource: 'testContact',
+      receiptKey: name,
+      body: payload
+    }),
     ['contact', 'data.contact'],
     'TEST contact',
     receipt
   );
-  recordCompletedCreate(receipt, 'testContact', name, '/contacts/');
   const readback = await readContact(client, receipt, created.id);
   requireMatchingCreatedId(created, readback, `TEST contact ${name}`);
   if (!exactTestContactReadback(readback, payload)) {
     throw new GuardError('CREATE_READBACK_FAILED', `TEST contact ${name} failed safe readback validation`);
   }
+  recordCompletedCreate(receipt, 'testContact', name, '/contacts/');
   return readback;
 }
 
@@ -1481,17 +1536,22 @@ async function ensureTestBusiness(client, manifest, receipt, name, payload) {
     return { ...matches[0], ...readback };
   }
   const created = requireCreatedResource(
-    await client.request('POST', '/objects/business/records', { mutating: true, body: payload }),
+    await client.request('POST', '/objects/business/records', {
+      mutating: true,
+      receiptResource: 'testBusiness',
+      receiptKey: name,
+      body: payload
+    }),
     ['record', 'data.record'],
     'TEST business',
     receipt
   );
-  recordCompletedCreate(receipt, 'testBusiness', name, '/objects/business/records');
   const readback = await readObjectRecord(client, receipt, 'business', created.id);
   requireMatchingCreatedId(created, readback, `TEST business ${name}`);
   if (!safeBusinessReadback(readback, payload.properties, manifest)) {
     throw new GuardError('CREATE_READBACK_FAILED', `TEST business ${name} failed exact readback`);
   }
+  recordCompletedCreate(receipt, 'testBusiness', name, '/objects/business/records');
   return { id: created.id, name, ...readback };
 }
 
@@ -1544,17 +1604,22 @@ async function ensureTestOpportunity(client, manifest, receipt, name, payload) {
     return readback;
   }
   const created = requireCreatedResource(
-    await client.request('POST', '/opportunities/', { mutating: true, body: payload }),
+    await client.request('POST', '/opportunities/', {
+      mutating: true,
+      receiptResource: 'testOpportunity',
+      receiptKey: name,
+      body: payload
+    }),
     ['opportunity', 'data.opportunity'],
     'TEST opportunity',
     receipt
   );
-  recordCompletedCreate(receipt, 'testOpportunity', name, '/opportunities/');
   const readback = await readOpportunity(client, receipt, created.id);
   requireMatchingCreatedId(created, readback, `TEST opportunity ${name}`);
   if (!exactTestOpportunityReadback(readback, payload)) {
     throw new GuardError('CREATE_READBACK_FAILED', `TEST opportunity ${name} failed exact readback`);
   }
+  recordCompletedCreate(receipt, 'testOpportunity', name, '/opportunities/');
   return readback;
 }
 
@@ -1605,11 +1670,12 @@ async function ensureTestAssignment(client, manifest, receipt, externalId, paylo
     'POST',
     `/objects/${encodeURIComponent(manifest.customObject.key)}/records`,
     {
-    mutating: true,
-    body: payload
+      mutating: true,
+      receiptResource: 'testAssignment',
+      receiptKey: externalId,
+      body: payload
     }
   ), ['record', 'data.record'], 'TEST assignment', receipt);
-  recordCompletedCreate(receipt, 'testAssignment', externalId, `/objects/${manifest.customObject.key}/records`);
   const readback = await readObjectRecord(
     client,
     receipt,
@@ -1620,6 +1686,7 @@ async function ensureTestAssignment(client, manifest, receipt, externalId, paylo
   if (!propertiesMatch(readback.properties, payload.properties)) {
     throw new GuardError('CREATE_READBACK_FAILED', 'TEST assignment failed exact readback');
   }
+  recordCompletedCreate(receipt, 'testAssignment', externalId, `/objects/${manifest.customObject.key}/records`);
   return readback;
 }
 
@@ -1651,12 +1718,16 @@ async function ensureTestRelation(client, manifest, receipt, association, homeow
     secondRecordId: assignmentId
   };
   const created = requireCreatedResource(
-    await client.request('POST', '/associations/relations', { mutating: true, body }),
+    await client.request('POST', '/associations/relations', {
+      mutating: true,
+      receiptResource: 'testRelation',
+      receiptKey: `${homeownerId}:${assignmentId}`,
+      body
+    }),
     ['relation', 'data.relation'],
     'TEST relation',
     receipt
   );
-  recordCompletedCreate(receipt, 'testRelation', `${homeownerId}:${assignmentId}`, '/associations/relations');
   relations = await readRelations(client, manifest, receipt, homeownerId, association.id);
   matches = relations.filter((relation) =>
     relation?.associationId === association.id &&
@@ -1665,6 +1736,7 @@ async function ensureTestRelation(client, manifest, receipt, association, homeow
   );
   if (matches.length !== 1) throw new GuardError('CREATE_READBACK_FAILED', 'TEST relation was not confirmed');
   requireMatchingCreatedId(created, matches[0], 'TEST relation');
+  recordCompletedCreate(receipt, 'testRelation', `${homeownerId}:${assignmentId}`, '/associations/relations');
   return matches[0];
 }
 
@@ -1782,8 +1854,15 @@ function createReceipt(manifest, options, nowIso) {
       agency: { source: null, printed: false, persisted: false },
       location: { source: null, printed: false, persisted: false }
     },
-    summary: { existing: 0, plannedCreates: 0, completedCreates: 0, collisions: 0 },
+    summary: {
+      existing: 0,
+      plannedCreates: 0,
+      acceptedCreates: 0,
+      completedCreates: 0,
+      collisions: 0
+    },
     actions: [],
+    acceptedCreates: [],
     completed: [],
     collisions: [],
     blockers: [],

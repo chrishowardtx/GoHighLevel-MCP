@@ -55,6 +55,16 @@ workflow, channel, or homeowner communication configuration.
 The current pages label these contracts `v3` and require the `Version: v3`
 header.
 
+Create success status and envelope handling are endpoint-specific. Pipeline
+create requires HTTP 200 and accepts the documented flat pipeline object.
+Custom Field V2 folder and association creates require HTTP 201 and accept the
+documented flat folder or association object. Legacy custom-field, Custom Field
+V2 field, and custom-object creates require HTTP 201. Previously observed
+wrapper envelopes remain supported for compatibility; wrapper paths are always
+evaluated before the flat `$` fallback so a wrapper cannot be mistaken for the
+created resource itself. Any other success status, unknown envelope, missing
+server ID, or create/readback ID mismatch halts without retrying the POST.
+
 ## Fail-closed ambiguities
 
 The Objects API documents plural keys such as `custom_objects.pet`. The Custom
@@ -116,3 +126,19 @@ the receipt replaces planned-create actions with the final all-existing
 readback plan. The stateful verification contract expects exactly 75 additive
 creates from an empty RestoreRadar schema; the custom object is first under the
 agency credential and every later create uses the location credential.
+
+An existing custom object is exact only when it is explicitly non-standard
+(`standard: false`), belongs to the pinned RestoreRadar location, and matches
+the complete namespaced object contract. A same-key or same-label standard
+object, or an object from another location, is an incompatible collision.
+
+The receipt distinguishes transport acceptance from verification. Every
+mutating request that receives any 2xx response is appended immediately to
+`acceptedCreates`, including resource, key, endpoint, status, and credential
+role, before status pinning, JSON/envelope parsing, or readback. `completed`
+contains only creates whose server-assigned ID and exact post-create readback
+both match. Thus a halted run, including a partial TEST graph, reports every
+accepted mutation without overstating how many resources were verified. The
+summary carries separate `acceptedCreates` and `completedCreates` counts, and
+`testVerification.recordsWritten` becomes true as soon as a TEST create is
+accepted.

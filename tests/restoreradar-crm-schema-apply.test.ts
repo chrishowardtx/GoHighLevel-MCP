@@ -21,6 +21,25 @@ type FetchCall = {
   body?: any;
 };
 
+type DocumentedCreateFamily =
+  | 'pipeline'
+  | 'legacy-field'
+  | 'v2-folder'
+  | 'v2-field'
+  | 'association';
+
+const DOCUMENTED_CREATE_FAMILIES: Array<{
+  family: DocumentedCreateFamily;
+  path: string;
+  status: number;
+}> = [
+  { family: 'pipeline', path: '/opportunities/pipelines', status: 200 },
+  { family: 'legacy-field', path: `/locations/${loadManifest().identity.locationId}/customFields`, status: 201 },
+  { family: 'v2-folder', path: '/custom-fields/folder', status: 201 },
+  { family: 'v2-field', path: '/custom-fields/', status: 201 },
+  { family: 'association', path: '/associations/', status: 201 }
+];
+
 const NOW = new Date('2026-08-09T12:34:56.000Z');
 const TEST_SUFFIX = '20260809T123456Z';
 const TOKEN = 'test_secret_token_value';
@@ -131,6 +150,8 @@ function completeFixture() {
   );
   const object = {
     id: 'object_assignment',
+    standard: false,
+    locationId: manifest.identity.locationId,
     key: manifest.customObject.key,
     labels: manifest.customObject.labels,
     description: manifest.customObject.description,
@@ -223,6 +244,8 @@ function completeFixture() {
 function completeRouter(call: FetchCall, overrides: {
   wrongBusinessFolder?: boolean;
   wrongBusinessObjectKey?: boolean;
+  wrongObjectStandard?: boolean;
+  wrongObjectLocation?: boolean;
   missingId?:
     | 'pipeline'
     | 'legacy-field'
@@ -254,6 +277,8 @@ function completeRouter(call: FetchCall, overrides: {
     const field = fixture.businessFields.find((entry: any) => entry.name.startsWith('RR |'));
     field.objectKey = 'wrong.business';
   }
+  if (overrides.wrongObjectStandard) fixture.object.standard = true;
+  if (overrides.wrongObjectLocation) fixture.object.locationId = 'wrong-location';
   const { manifest } = fixture;
   const pathname = call.url.pathname;
   const ids = testIds(TEST_SUFFIX);
@@ -497,7 +522,13 @@ function completeRouter(call: FetchCall, overrides: {
   throw new Error(`Unexpected request in complete fixture: ${call.method} ${pathname}`);
 }
 
-function statefulMissingSchemaServer(objectReadDelay = 0) {
+function statefulMissingSchemaServer(objectReadDelay = 0, options: {
+  envelope?: 'flat' | 'wrapper';
+  failure?: {
+    family: DocumentedCreateFamily | 'test-assignment';
+    kind: 'wrong-status' | 'missing-id' | 'id-mismatch';
+  };
+} = {}) {
   const manifest = loadManifest();
   let sequence = 0;
   const nextId = (prefix: string) => `${prefix}_${++sequence}`;
@@ -517,6 +548,29 @@ function statefulMissingSchemaServer(objectReadDelay = 0) {
     assignments: [],
     relations: [],
     writeLog: []
+  };
+
+  const createResponse = (
+    family: string,
+    wrapperName: string,
+    resource: any,
+    expectedStatus: number,
+    documentedFlat = false
+  ) => {
+    const responseResource = { ...resource };
+    if (options.failure?.family === family && options.failure.kind === 'missing-id') {
+      delete responseResource.id;
+    }
+    if (options.failure?.family === family && options.failure.kind === 'id-mismatch') {
+      responseResource.id = `mismatched_${resource.id}`;
+    }
+    const status = options.failure?.family === family && options.failure.kind === 'wrong-status'
+      ? expectedStatus === 200 ? 201 : 200
+      : expectedStatus;
+    const body = documentedFlat && options.envelope !== 'wrapper'
+      ? responseResource
+      : { [wrapperName]: responseResource };
+    return jsonResponse(body, status);
   };
 
   const router = (call: FetchCall) => {
@@ -550,7 +604,7 @@ function statefulMissingSchemaServer(objectReadDelay = 0) {
         stages: call.body.stages.map((stage: any) => ({ ...stage, id: nextId('stage') }))
       };
       state.pipelines.push(pipeline);
-      return jsonResponse({ pipeline }, 201);
+      return createResponse('pipeline', 'pipeline', pipeline, 200, true);
     }
     if (call.method === 'GET' && pathname.endsWith('/customFields')) {
       const model = call.url.searchParams.get('model');
@@ -563,7 +617,7 @@ function statefulMissingSchemaServer(objectReadDelay = 0) {
     if (call.method === 'POST' && pathname.endsWith('/customFields')) {
       const customField = { ...call.body, id: nextId(`${call.body.model}_field`) };
       state.legacyFields.push(customField);
-      return jsonResponse({ customField }, 201);
+      return createResponse('legacy-field', 'customField', customField, 201);
     }
     if (call.method === 'GET' && pathname === '/objects/') {
       return jsonResponse({
@@ -614,7 +668,7 @@ function statefulMissingSchemaServer(objectReadDelay = 0) {
         ? state.businessFolders
         : state.customFolders;
       target.push(folder);
-      return jsonResponse({ folder }, 201);
+      return createResponse('v2-folder', 'folder', folder, 201, true);
     }
     if (call.method === 'POST' && pathname === '/custom-fields/') {
       const field = { ...call.body, id: nextId('v2_field'), options: call.body.options || [] };
@@ -622,7 +676,7 @@ function statefulMissingSchemaServer(objectReadDelay = 0) {
         ? state.businessFields
         : state.customFields;
       target.push(field);
-      return jsonResponse({ field }, 201);
+      return createResponse('v2-field', 'field', field, 201);
     }
     if (call.method === 'GET' && pathname === '/associations/') {
       return jsonResponse({ associations: state.associations });
@@ -630,7 +684,7 @@ function statefulMissingSchemaServer(objectReadDelay = 0) {
     if (call.method === 'POST' && pathname === '/associations/') {
       const association = { ...call.body, id: nextId('association') };
       state.associations.push(association);
-      return jsonResponse({ association }, 201);
+      return createResponse('association', 'association', association, 201, true);
     }
     if (call.method === 'POST' && pathname === '/contacts/search') {
       return jsonResponse({
@@ -698,7 +752,7 @@ function statefulMissingSchemaServer(objectReadDelay = 0) {
     ) {
       const record = { ...call.body, id: nextId('assignment') };
       state.assignments.push(record);
-      return jsonResponse({ record }, 201);
+      return createResponse('test-assignment', 'record', record, 201);
     }
     if (
       call.method === 'GET' &&
@@ -885,6 +939,24 @@ describe('RestoreRadar guarded CRM schema apply tool', () => {
       now: () => NOW
     });
     expect(result.receipt.haltReason.code).toBe('SCHEMA_PLAN_HALTED');
+    expect(calls.every((call) => call.method === 'GET')).toBe(true);
+  });
+
+  test.each([
+    ['standard custom object', { wrongObjectStandard: true }],
+    ['custom object from another location', { wrongObjectLocation: true }]
+  ])('rejects an otherwise exact %s during read-only discovery', async (_label, overrides) => {
+    const { calls, fetchImpl } = mockFetch((call) => completeRouter(call, overrides));
+    const result = await runSchemaTool({
+      argv: requiredArgs(),
+      fetchImpl,
+      env: credentialEnv(),
+      now: () => NOW
+    });
+    expect(result.receipt.haltReason.code).toBe('SCHEMA_PLAN_HALTED');
+    expect(result.receipt.collisions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ resource: 'customObject' })
+    ]));
     expect(calls.every((call) => call.method === 'GET')).toBe(true);
   });
 
@@ -1233,6 +1305,10 @@ describe('RestoreRadar guarded CRM schema apply tool', () => {
     expect(posts[0].url.pathname).toBe('/objects/');
     expect(posts[0].headers.Authorization).toBe(`Bearer ${AGENCY_TOKEN}`);
     expect(result.receipt.haltReason.code).toBe('MALFORMED_OBJECT_CREATE_RESPONSE');
+    expect(result.receipt.acceptedCreates).toEqual([
+      expect.objectContaining({ path: '/objects/', status: 201, credentialRole: 'agency' })
+    ]);
+    expect(result.receipt.completed).toEqual([]);
   });
 
   test('object create accepted but permanently unverified makes one POST then read-only retries', async () => {
@@ -1254,9 +1330,12 @@ describe('RestoreRadar guarded CRM schema apply tool', () => {
     expect(calls.filter((call) =>
       call.method === 'GET' && call.url.pathname === `/objects/${server.manifest.customObject.key}`
     )).toHaveLength(3);
-    expect(result.receipt.completed).toEqual([
-      expect.objectContaining({ resource: 'customObject', status: 'created' })
+    expect(result.receipt.acceptedCreates).toEqual([
+      expect.objectContaining({ path: '/objects/', status: 201, credentialRole: 'agency' })
     ]);
+    expect(result.receipt.summary.acceptedCreates).toBe(1);
+    expect(result.receipt.completed).toEqual([]);
+    expect(result.receipt.summary.completedCreates).toBe(0);
   });
 
   test('creates a complete missing schema and TEST graph, then replays with zero writes', async () => {
@@ -1277,11 +1356,29 @@ describe('RestoreRadar guarded CRM schema apply tool', () => {
     );
     expect(firstMutationPosts).toHaveLength(75);
     expect(server.state.writeLog).toHaveLength(75);
+    expect(firstResult.receipt.acceptedCreates).toHaveLength(75);
+    expect(firstResult.receipt.completed).toHaveLength(75);
+    expect(firstResult.receipt.summary.acceptedCreates).toBe(75);
+    expect(firstResult.receipt.summary.completedCreates).toBe(75);
     expect(firstMutationPosts[0].url.pathname).toBe('/objects/');
     expect(server.state.writeLog[0].authorization).toBe(`Bearer ${AGENCY_TOKEN}`);
     expect(server.state.writeLog.slice(1).every((write: any) =>
       write.authorization === `Bearer ${TOKEN}`
     )).toBe(true);
+    for (const { path, status } of DOCUMENTED_CREATE_FAMILIES) {
+      const requests = firstResult.receipt.requests.filter((request: any) =>
+        request.method === 'POST' && request.path === path
+      );
+      expect(requests.length).toBeGreaterThan(0);
+      expect(requests.every((request: any) =>
+        request.status === status && request.accepted2xx === true
+      )).toBe(true);
+    }
+    expect(firstResult.receipt.responseShapes).toEqual(expect.arrayContaining([
+      { resource: 'pipeline.create', path: '$' },
+      { resource: 'custom field folder.create', path: '$' },
+      { resource: 'association.create', path: '$' }
+    ]));
     expect(firstResult.receipt.actions.every((action: any) => action.status === 'exists')).toBe(true);
     expect(server.state.pipelines).toHaveLength(2);
     expect(server.state.legacyFields).toHaveLength(
@@ -1330,6 +1427,7 @@ describe('RestoreRadar guarded CRM schema apply tool', () => {
       now: () => new Date('2035-06-07T08:09:10.000Z')
     });
     expect(secondResult.receipt.verdict).toBe('APPLIED');
+    expect(secondResult.receipt.acceptedCreates).toEqual([]);
     expect(secondResult.receipt.completed).toEqual([]);
     const secondMutationPosts = second.calls.filter((call) =>
       call.method === 'POST' &&
@@ -1338,6 +1436,147 @@ describe('RestoreRadar guarded CRM schema apply tool', () => {
     );
     expect(secondMutationPosts).toEqual([]);
     expect(server.state.writeLog).toHaveLength(75);
+  });
+
+  test('retains compatibility with wrapped pipeline, folder, and association create envelopes', async () => {
+    const server = statefulMissingSchemaServer(0, { envelope: 'wrapper' });
+    const { fetchImpl } = mockFetch(server.router);
+    const result = await runSchemaTool({
+      argv: requiredArgs(['--apply', '--test-suffix', TEST_SUFFIX]),
+      fetchImpl,
+      env: credentialEnv(),
+      now: () => NOW
+    });
+    expect(result.receipt.verdict).toBe('APPLIED');
+    expect(result.receipt.acceptedCreates).toHaveLength(75);
+    expect(result.receipt.completed).toHaveLength(75);
+    expect(result.receipt.responseShapes).toEqual(expect.arrayContaining([
+      { resource: 'pipeline.create', path: 'pipeline' },
+      { resource: 'custom field folder.create', path: 'folder' },
+      { resource: 'association.create', path: 'association' }
+    ]));
+  });
+
+  test.each(DOCUMENTED_CREATE_FAMILIES)(
+    'halts after one accepted $family POST when the 2xx status is not the documented status',
+    async ({ family, path, status }) => {
+      const server = statefulMissingSchemaServer(0, {
+        failure: { family, kind: 'wrong-status' }
+      });
+      const { calls, fetchImpl } = mockFetch(server.router);
+      const result = await runSchemaTool({
+        argv: requiredArgs(['--apply', '--test-suffix', TEST_SUFFIX]),
+        fetchImpl,
+        env: credentialEnv(),
+        now: () => NOW
+      });
+      const targetPosts = calls.filter((call) =>
+        call.method === 'POST' && call.url.pathname === path
+      );
+      const targetRequests = result.receipt.requests.filter((request: any) =>
+        request.method === 'POST' && request.path === path
+      );
+      const accepted = result.receipt.acceptedCreates.filter((entry: any) => entry.path === path);
+      expect(result.receipt.haltReason.code).toBe('UNEXPECTED_SUCCESS_STATUS');
+      expect(targetPosts).toHaveLength(1);
+      expect(targetRequests).toEqual([
+        expect.objectContaining({ status: status === 200 ? 201 : 200, accepted2xx: true })
+      ]);
+      expect(accepted).toHaveLength(1);
+      expect(result.receipt.acceptedCreates.length).toBeGreaterThan(result.receipt.completed.length);
+      expect(result.receipt.completed.some((entry: any) => entry.path === path)).toBe(false);
+    }
+  );
+
+  test.each(DOCUMENTED_CREATE_FAMILIES)(
+    'halts after one accepted $family POST when the create envelope has no ID',
+    async ({ family, path, status }) => {
+      const server = statefulMissingSchemaServer(0, {
+        failure: { family, kind: 'missing-id' }
+      });
+      const { calls, fetchImpl } = mockFetch(server.router);
+      const result = await runSchemaTool({
+        argv: requiredArgs(['--apply', '--test-suffix', TEST_SUFFIX]),
+        fetchImpl,
+        env: credentialEnv(),
+        now: () => NOW
+      });
+      const targetPosts = calls.filter((call) =>
+        call.method === 'POST' && call.url.pathname === path
+      );
+      const targetRequest = result.receipt.requests.find((request: any) =>
+        request.method === 'POST' && request.path === path
+      );
+      const accepted = result.receipt.acceptedCreates.filter((entry: any) => entry.path === path);
+      expect(result.receipt.haltReason.code).toBe('CREATE_RESPONSE_ID_MISSING');
+      expect(targetPosts).toHaveLength(1);
+      expect(targetRequest).toEqual(expect.objectContaining({ status, accepted2xx: true }));
+      expect(accepted).toHaveLength(1);
+      expect(result.receipt.acceptedCreates.length).toBeGreaterThan(result.receipt.completed.length);
+      expect(result.receipt.completed.some((entry: any) => entry.path === path)).toBe(false);
+    }
+  );
+
+  test.each(DOCUMENTED_CREATE_FAMILIES)(
+    'requires $family readback to match the exact server-assigned create ID',
+    async ({ family, path, status }) => {
+      const server = statefulMissingSchemaServer(0, {
+        failure: { family, kind: 'id-mismatch' }
+      });
+      const { calls, fetchImpl } = mockFetch(server.router);
+      const result = await runSchemaTool({
+        argv: requiredArgs(['--apply', '--test-suffix', TEST_SUFFIX]),
+        fetchImpl,
+        env: credentialEnv(),
+        now: () => NOW
+      });
+      const targetPosts = calls.filter((call) =>
+        call.method === 'POST' && call.url.pathname === path
+      );
+      const accepted = result.receipt.acceptedCreates.filter((entry: any) => entry.path === path);
+      expect(result.receipt.haltReason.code).toBe('CREATE_RESPONSE_ID_MISMATCH');
+      expect(targetPosts).toHaveLength(1);
+      expect(accepted).toEqual([
+        expect.objectContaining({ status, resource: expect.any(String) })
+      ]);
+      expect(result.receipt.completed.some((entry: any) => entry.path === path)).toBe(false);
+    }
+  );
+
+  test('reports an accepted partial TEST graph separately from readback-verified creates', async () => {
+    const server = statefulMissingSchemaServer(0, {
+      failure: { family: 'test-assignment', kind: 'missing-id' }
+    });
+    const { calls, fetchImpl } = mockFetch(server.router);
+    const result = await runSchemaTool({
+      argv: requiredArgs(['--apply', '--test-suffix', TEST_SUFFIX]),
+      fetchImpl,
+      env: credentialEnv(),
+      now: () => NOW
+    });
+    const assignmentPath = `/objects/${server.manifest.customObject.key}/records`;
+    expect(result.receipt.haltReason.code).toBe('CREATE_RESPONSE_ID_MISSING');
+    expect(result.receipt.acceptedCreates).toHaveLength(74);
+    expect(result.receipt.completed).toHaveLength(73);
+    expect(result.receipt.summary.acceptedCreates).toBe(74);
+    expect(result.receipt.summary.completedCreates).toBe(73);
+    expect(result.receipt.testVerification).toMatchObject({
+      recordsRead: true,
+      recordsWritten: true
+    });
+    expect(result.receipt.acceptedCreates.at(-1)).toEqual(expect.objectContaining({
+      resource: 'testAssignment',
+      key: testIds(TEST_SUFFIX).assignmentExternalId,
+      path: assignmentPath,
+      status: 201
+    }));
+    expect(result.receipt.completed.some((entry: any) => entry.resource === 'testAssignment')).toBe(false);
+    expect(calls.filter((call) =>
+      call.method === 'POST' && call.url.pathname === assignmentPath
+    )).toHaveLength(1);
+    expect(calls.some((call) =>
+      call.method === 'POST' && call.url.pathname === '/associations/relations'
+    )).toBe(false);
   });
 
   test('separates plural schema reads from one server-resolved singular V2 write namespace', () => {
