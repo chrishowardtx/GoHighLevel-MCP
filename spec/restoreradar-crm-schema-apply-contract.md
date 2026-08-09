@@ -70,9 +70,10 @@ object record, RR Lead Assignment custom-object record, and association
 relation. Contact keeps the `contact`/`data.contact` envelopes, Opportunity
 keeps `opportunity`/`data.opportunity`, and both object-record families keep
 `record`/`data.record`; those families do not accept an undocumented flat
-fallback. Relation create accepts the documented flat relation object, while
-retaining `relation`/`data.relation` wrapper compatibility in wrapper-first
-order. A different 2xx status is still recorded as accepted and then halts.
+fallback. The current relation-create response schema is association-definition
+metadata, not authoritative relation identity. The tool ignores every relation
+response body shape and uses only its pinned HTTP 201 status plus two-sided list
+readback. A different 2xx status is still recorded as accepted and then halts.
 
 ## Fail-closed ambiguities
 
@@ -84,17 +85,26 @@ then reconciles every V2 `objectKey`, `fieldKey`, and folder `objectKey` into on
 server-returned write namespace. Folder/field POSTs use only that resolved
 namespace; missing or conflicting evidence halts the run.
 
+An existing custom object must reconcile the collection result with direct
+object details. Both representations must carry the same nonempty ID and the
+exact non-standard/location/key/labels/description/primary-property contract.
+Namespace proof also requires exactly one primary field matching the manifest:
+nonempty ID, name `RR Assignment ID`, type `TEXT`, allowed singular-or-plural
+RR object namespace, and a field key equal to that object key plus
+`.rr_assignment_id`. A suffix-only, unnamed, untyped, ID-less, or conflicting
+field is not namespace evidence.
+
 The agency credential may call only company identity GET and custom-object
 schema POST. The location credential handles all other reads and creates.
 Protocol-relative paths, alternate origins, cross-company/location payloads,
 and role-crossing endpoints are rejected before network dispatch. A successful
 object schema create must be HTTP 201 with the exact server object ID, location,
 key, labels, description, and primary property before any later POST can run.
-Every create response must expose a server-assigned ID. The tool matches that
-ID against a direct record read where the API supports one, otherwise against
-the exact collection readback. Object-schema visibility gets a bounded direct
-read retry; if it remains unavailable, the run halts without repeating the
-object POST or proceeding to bulk creates.
+Every create response except relation create must expose a server-assigned ID.
+The tool matches that ID against a direct record read where the API supports
+one, otherwise against the exact collection readback. Object-schema visibility
+gets a bounded direct read retry; if it remains unavailable, the run halts
+without repeating the object POST or proceeding to bulk creates.
 
 The v3 create-record page currently exposes an open request-body schema. The
 tool uses the documented `properties` record shape, creates only TEST-marked
@@ -113,6 +123,16 @@ at `Queued`; Resend IDs and sent/delivered timestamps are absent.
 The projection contains no IP address, user agent, or raw homeowner narrative.
 Only the Contact-to-RR-Lead-Assignment relation is created. Opportunity and
 Business references remain scalar IDs on the assignment record.
+
+A TEST relation is exact only when GET
+`/associations/relations/:recordId` independently returns exactly one matching
+association and homeowner/assignment pair from both the homeowner and
+assignment sides. Pair orientation may reverse between those views. If both
+views expose relation IDs, the IDs must match; an absent ID on either view is
+not itself a failure. One-sided evidence, a wrong pair/association, duplicates,
+or differing two-sided IDs halts. Before create, partial evidence blocks a
+duplicate POST. After an accepted HTTP 201, failed two-sided proof records the
+write as accepted-but-unverified and never retries it.
 
 Existing TEST contacts and opportunities must have exactly the expected tag or
 nonempty custom-field IDs and values. Empty API placeholders are allowed, but
@@ -145,8 +165,9 @@ The receipt distinguishes transport acceptance from verification. Every
 mutating request that receives any 2xx response is appended immediately to
 `acceptedCreates`, including resource, key, endpoint, status, and credential
 role, before status pinning, JSON/envelope parsing, or readback. `completed`
-contains only creates whose server-assigned ID and exact post-create readback
-both match. Thus a halted run, including a partial TEST graph, reports every
+contains only creates with exact post-create readback (and matching
+server-assigned IDs wherever the endpoint provides authoritative create/read
+IDs). Thus a halted run, including a partial TEST graph, reports every
 accepted mutation without overstating how many resources were verified. The
 summary carries separate `acceptedCreates` and `completedCreates` counts, and
 `testVerification.recordsWritten` becomes true as soon as a TEST create is

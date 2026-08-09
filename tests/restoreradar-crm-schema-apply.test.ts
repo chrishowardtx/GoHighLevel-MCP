@@ -47,6 +47,17 @@ type TestCreateFamily =
   | 'test-assignment'
   | 'test-relation';
 
+type RelationScenario =
+  | 'exact'
+  | 'empty-homeowner'
+  | 'empty-assignment'
+  | 'duplicate-homeowner'
+  | 'duplicate-assignment'
+  | 'mismatched-pair'
+  | 'mismatched-association'
+  | 'id-missing-homeowner'
+  | 'id-mismatch';
+
 const TEST_CREATE_FAMILIES: Array<{
   family: TestCreateFamily;
   path: string;
@@ -269,6 +280,9 @@ function completeRouter(call: FetchCall, overrides: {
   wrongBusinessObjectKey?: boolean;
   wrongObjectStandard?: boolean;
   wrongObjectLocation?: boolean;
+  directObjectIdMismatch?: boolean;
+  directObjectContractMismatch?: boolean;
+  primaryFieldIssue?: 'missing-id' | 'wrong-name' | 'wrong-type' | 'wrong-key';
   missingId?:
     | 'pipeline'
     | 'legacy-field'
@@ -302,6 +316,12 @@ function completeRouter(call: FetchCall, overrides: {
   }
   if (overrides.wrongObjectStandard) fixture.object.standard = true;
   if (overrides.wrongObjectLocation) fixture.object.locationId = 'wrong-location';
+  if (overrides.primaryFieldIssue === 'missing-id') delete fixture.primaryField.id;
+  if (overrides.primaryFieldIssue === 'wrong-name') fixture.primaryField.name = 'Wrong Primary Name';
+  if (overrides.primaryFieldIssue === 'wrong-type') fixture.primaryField.dataType = 'NUMBER';
+  if (overrides.primaryFieldIssue === 'wrong-key') {
+    fixture.primaryField.fieldKey = 'custom_object.rr_lead_assignment.wrong_primary';
+  }
   const { manifest } = fixture;
   const pathname = call.url.pathname;
   const ids = testIds(TEST_SUFFIX);
@@ -379,7 +399,10 @@ function completeRouter(call: FetchCall, overrides: {
     });
   }
   if (call.method === 'GET' && pathname === `/objects/${manifest.customObject.key}`) {
-    return jsonResponse({ object: fixture.object, fields: [fixture.primaryField] });
+    const object = { ...fixture.object };
+    if (overrides.directObjectIdMismatch) object.id = 'wrong-direct-object-id';
+    if (overrides.directObjectContractMismatch) object.description = 'Wrong direct object description';
+    return jsonResponse({ object, fields: [fixture.primaryField] });
   }
   if (call.method === 'GET' && pathname === '/custom-fields/object-key/business') {
     const fields = fixture.businessFields.map((field: any) => ({ ...field }));
@@ -532,7 +555,13 @@ function completeRouter(call: FetchCall, overrides: {
       }]
     });
   }
-  if (call.method === 'GET' && pathname === '/associations/relations/contact_homeowner') {
+  if (
+    call.method === 'GET' &&
+    (
+      pathname === '/associations/relations/contact_homeowner' ||
+      pathname === '/associations/relations/assignment_test'
+    )
+  ) {
     return jsonResponse({
       relations: [{
         id: 'relation_test',
@@ -547,6 +576,7 @@ function completeRouter(call: FetchCall, overrides: {
 
 function statefulMissingSchemaServer(objectReadDelay = 0, options: {
   envelope?: 'flat' | 'wrapper';
+  relationScenario?: RelationScenario;
   failure?: {
     family: DocumentedCreateFamily | TestCreateFamily;
     kind: 'wrong-status' | 'missing-id' | 'id-mismatch';
@@ -570,6 +600,7 @@ function statefulMissingSchemaServer(objectReadDelay = 0, options: {
     opportunities: [],
     assignments: [],
     relations: [],
+    relationScenario: options.relationScenario || 'exact',
     writeLog: []
   };
 
@@ -786,17 +817,75 @@ function statefulMissingSchemaServer(objectReadDelay = 0, options: {
       return record ? jsonResponse({ record }) : jsonResponse({}, 404);
     }
     if (call.method === 'GET' && pathname.startsWith('/associations/relations/')) {
-      const homeownerId = pathname.split('/').pop();
-      return jsonResponse({
-        relations: state.relations.filter((relation: any) =>
-          relation.firstRecordId === homeownerId
-        )
-      });
+      const recordId = pathname.split('/').pop();
+      const base = state.relations.filter((relation: any) =>
+        relation.firstRecordId === recordId || relation.secondRecordId === recordId
+      ).map((relation: any) => recordId === relation.secondRecordId
+        ? {
+          ...relation,
+          firstRecordId: relation.secondRecordId,
+          secondRecordId: relation.firstRecordId
+        }
+        : { ...relation }
+      );
+      const isHomeownerSide = state.relations.some((relation: any) =>
+        relation.firstRecordId === recordId
+      );
+      const isAssignmentSide = state.relations.some((relation: any) =>
+        relation.secondRecordId === recordId
+      );
+      let relations = base;
+      if (
+        (state.relationScenario === 'empty-homeowner' && isHomeownerSide) ||
+        (state.relationScenario === 'empty-assignment' && isAssignmentSide)
+      ) {
+        relations = [];
+      } else if (
+        (state.relationScenario === 'duplicate-homeowner' && isHomeownerSide) ||
+        (state.relationScenario === 'duplicate-assignment' && isAssignmentSide)
+      ) {
+        relations = base.flatMap((relation: any) => [
+          relation,
+          { ...relation, id: `${relation.id}_duplicate` }
+        ]);
+      } else if (state.relationScenario === 'mismatched-pair') {
+        relations = base.map((relation: any) => isHomeownerSide
+          ? { ...relation, secondRecordId: 'wrong-assignment' }
+          : { ...relation, secondRecordId: 'wrong-homeowner' }
+        );
+      } else if (state.relationScenario === 'mismatched-association') {
+        relations = base.map((relation: any) => ({
+          ...relation,
+          associationId: 'wrong-association'
+        }));
+      } else if (state.relationScenario === 'id-missing-homeowner' && isHomeownerSide) {
+        relations = base.map((relation: any) => {
+          const withoutId = { ...relation };
+          delete withoutId.id;
+          return withoutId;
+        });
+      } else if (state.relationScenario === 'id-mismatch') {
+        relations = base.map((relation: any) => ({
+          ...relation,
+          id: `${relation.id}_${isAssignmentSide ? 'assignment' : 'homeowner'}`
+        }));
+      }
+      return jsonResponse({ relations });
     }
     if (call.method === 'POST' && pathname === '/associations/relations') {
       const relation = { ...call.body, id: nextId('relation') };
       state.relations.push(relation);
-      return createResponse('test-relation', 'relation', relation, 201, true);
+      const status = options.failure?.family === 'test-relation' &&
+        options.failure.kind === 'wrong-status' ? 200 : 201;
+      const body = options.envelope === 'wrapper'
+        ? { relation }
+        : {
+          id: relation.associationId,
+          key: manifest.association.key,
+          firstObjectKey: manifest.association.firstObjectKey,
+          secondObjectKey: manifest.association.secondObjectKey
+        };
+      return jsonResponse(body, status);
     }
     throw new Error(`Unexpected request in stateful fixture: ${call.method} ${pathname}`);
   };
@@ -982,6 +1071,44 @@ describe('RestoreRadar guarded CRM schema apply tool', () => {
     ]));
     expect(calls.every((call) => call.method === 'GET')).toBe(true);
   });
+
+  test.each([
+    ['list/direct object ID mismatch', { directObjectIdMismatch: true }],
+    ['direct object contract mismatch', { directObjectContractMismatch: true }]
+  ])('blocks read-only discovery on %s', async (_label, overrides) => {
+    const { calls, fetchImpl } = mockFetch((call) => completeRouter(call, overrides));
+    const result = await runSchemaTool({
+      argv: requiredArgs(),
+      fetchImpl,
+      env: credentialEnv(),
+      now: () => NOW
+    });
+    expect(result.receipt.haltReason.code).toBe('SCHEMA_PLAN_HALTED');
+    expect(result.receipt.blockers).toEqual(expect.arrayContaining([
+      expect.objectContaining({ resource: 'customObjectDirectReadback' })
+    ]));
+    expect(calls.every((call) => call.method === 'GET')).toBe(true);
+  });
+
+  test.each(['missing-id', 'wrong-name', 'wrong-type', 'wrong-key'])(
+    'blocks namespace proof when the primary field has %s',
+    async (primaryFieldIssue: any) => {
+      const { calls, fetchImpl } = mockFetch((call) =>
+        completeRouter(call, { primaryFieldIssue })
+      );
+      const result = await runSchemaTool({
+        argv: requiredArgs(),
+        fetchImpl,
+        env: credentialEnv(),
+        now: () => NOW
+      });
+      expect(result.receipt.haltReason.code).toBe('SCHEMA_PLAN_HALTED');
+      expect(result.receipt.blockers).toEqual(expect.arrayContaining([
+        expect.objectContaining({ resource: 'customObjectFieldPrefix' })
+      ]));
+      expect(calls.every((call) => call.method === 'GET')).toBe(true);
+    }
+  );
 
   test.each([
     'pipeline',
@@ -1361,7 +1488,7 @@ describe('RestoreRadar guarded CRM schema apply tool', () => {
     expect(result.receipt.summary.completedCreates).toBe(0);
   });
 
-  test('creates a complete missing schema and TEST graph, then replays with zero writes', async () => {
+  test('creates the full TEST graph from an arbitrary relation body only after two-sided proof, then replays with zero writes', async () => {
     const server = statefulMissingSchemaServer(2);
     const first = mockFetch(server.router);
     const firstResult = await runSchemaTool({
@@ -1404,9 +1531,11 @@ describe('RestoreRadar guarded CRM schema apply tool', () => {
       { resource: 'TEST contact.create', path: 'contact' },
       { resource: 'TEST business.create', path: 'record' },
       { resource: 'TEST opportunity.create', path: 'opportunity' },
-      { resource: 'TEST assignment.create', path: 'record' },
-      { resource: 'TEST relation.create', path: '$' }
+      { resource: 'TEST assignment.create', path: 'record' }
     ]));
+    expect(firstResult.receipt.responseShapes.some((shape: any) =>
+      shape.resource === 'TEST relation.create'
+    )).toBe(false);
     expect(firstResult.receipt.actions.every((action: any) => action.status === 'exists')).toBe(true);
     expect(server.state.pipelines).toHaveLength(2);
     expect(server.state.legacyFields).toHaveLength(
@@ -1421,6 +1550,12 @@ describe('RestoreRadar guarded CRM schema apply tool', () => {
     expect(server.state.opportunities).toHaveLength(2);
     expect(server.state.assignments).toHaveLength(1);
     expect(server.state.relations).toHaveLength(1);
+    expect(firstResult.receipt.acceptedCreates.filter((entry: any) =>
+      entry.resource === 'testRelation'
+    )).toHaveLength(1);
+    expect(firstResult.receipt.completed.filter((entry: any) =>
+      entry.resource === 'testRelation'
+    )).toHaveLength(1);
     const ids = testIds(TEST_SUFFIX);
     const homeowner = server.state.contacts.find((contact: any) => contact.name === ids.homeownerName);
     const business = server.state.businesses[0];
@@ -1463,10 +1598,16 @@ describe('RestoreRadar guarded CRM schema apply tool', () => {
       !call.url.pathname.endsWith('/records/search')
     );
     expect(secondMutationPosts).toEqual([]);
+    expect(second.calls.filter((call) =>
+      call.method === 'GET' && call.url.pathname.startsWith('/associations/relations/')
+    ).map((call) => call.url.pathname)).toEqual([
+      `/associations/relations/${homeowner.id}`,
+      `/associations/relations/${assignment.id}`
+    ]);
     expect(server.state.writeLog).toHaveLength(75);
   });
 
-  test('retains compatibility with wrapped pipeline, folder, association, and relation create envelopes', async () => {
+  test('ignores a wrapped relation create body while retaining other wrapper compatibility', async () => {
     const server = statefulMissingSchemaServer(0, { envelope: 'wrapper' });
     const { fetchImpl } = mockFetch(server.router);
     const result = await runSchemaTool({
@@ -1481,9 +1622,11 @@ describe('RestoreRadar guarded CRM schema apply tool', () => {
     expect(result.receipt.responseShapes).toEqual(expect.arrayContaining([
       { resource: 'pipeline.create', path: 'pipeline' },
       { resource: 'custom field folder.create', path: 'folder' },
-      { resource: 'association.create', path: 'association' },
-      { resource: 'TEST relation.create', path: 'relation' }
+      { resource: 'association.create', path: 'association' }
     ]));
+    expect(result.receipt.responseShapes.some((shape: any) =>
+      shape.resource === 'TEST relation.create'
+    )).toBe(false);
   });
 
   test.each(DOCUMENTED_CREATE_FAMILIES)(
@@ -1607,15 +1750,10 @@ describe('RestoreRadar guarded CRM schema apply tool', () => {
     }
   );
 
-  test.each([
-    { kind: 'missing-id', code: 'CREATE_RESPONSE_ID_MISSING' },
-    { kind: 'id-mismatch', code: 'CREATE_RESPONSE_ID_MISMATCH' }
-  ])(
-    'halts after one documented-flat relation POST on $kind and keeps acceptance separate from verification',
-    async ({ kind, code }) => {
-      const server = statefulMissingSchemaServer(0, {
-        failure: { family: 'test-relation', kind: kind as 'missing-id' | 'id-mismatch' }
-      });
+  test.each(['empty-homeowner', 'empty-assignment'] as RelationScenario[])(
+    'halts an accepted relation create when %s prevents two-sided proof',
+    async (scenario) => {
+      const server = statefulMissingSchemaServer(0, { relationScenario: scenario });
       const { calls, fetchImpl } = mockFetch(server.router);
       const result = await runSchemaTool({
         argv: requiredArgs(['--apply', '--test-suffix', TEST_SUFFIX]),
@@ -1623,24 +1761,134 @@ describe('RestoreRadar guarded CRM schema apply tool', () => {
         env: credentialEnv(),
         now: () => NOW
       });
-      const relationPosts = calls.filter((call) =>
+      expect(result.receipt.haltReason.code).toBe('CREATE_ACCEPTED_READBACK_PENDING');
+      expect(calls.filter((call) =>
         call.method === 'POST' && call.url.pathname === '/associations/relations'
-      );
-      expect(result.receipt.haltReason.code).toBe(code);
-      expect(relationPosts).toHaveLength(1);
-      expect(result.receipt.acceptedCreates.at(-1)).toEqual(expect.objectContaining({
-        resource: 'testRelation',
-        path: '/associations/relations',
-        status: 201
-      }));
-      expect(result.receipt.completed.some((entry: any) => entry.resource === 'testRelation')).toBe(false);
+      )).toHaveLength(1);
+      expect(result.receipt.acceptedCreates.filter((entry: any) =>
+        entry.resource === 'testRelation'
+      )).toHaveLength(1);
+      expect(result.receipt.completed.filter((entry: any) =>
+        entry.resource === 'testRelation'
+      )).toHaveLength(0);
       expect(result.receipt.acceptedCreates).toHaveLength(75);
       expect(result.receipt.completed).toHaveLength(74);
-      expect(result.receipt.responseShapes).toEqual(expect.arrayContaining([
-        { resource: 'TEST relation.create', path: '$' }
-      ]));
     }
   );
+
+  test.each(['duplicate-homeowner', 'duplicate-assignment'] as RelationScenario[])(
+    'collides after one accepted relation create when %s returns duplicate exact pairs',
+    async (scenario) => {
+      const server = statefulMissingSchemaServer(0, { relationScenario: scenario });
+      const { calls, fetchImpl } = mockFetch(server.router);
+      const result = await runSchemaTool({
+        argv: requiredArgs(['--apply', '--test-suffix', TEST_SUFFIX]),
+        fetchImpl,
+        env: credentialEnv(),
+        now: () => NOW
+      });
+      expect(result.receipt.haltReason.code).toBe('INCOMPATIBLE_COLLISION');
+      expect(calls.filter((call) =>
+        call.method === 'POST' && call.url.pathname === '/associations/relations'
+      )).toHaveLength(1);
+      expect(result.receipt.acceptedCreates.filter((entry: any) =>
+        entry.resource === 'testRelation'
+      )).toHaveLength(1);
+      expect(result.receipt.completed.some((entry: any) =>
+        entry.resource === 'testRelation'
+      )).toBe(false);
+    }
+  );
+
+  test.each(['mismatched-pair', 'mismatched-association'] as RelationScenario[])(
+    'halts an accepted relation create when two-sided reads expose a %s',
+    async (scenario) => {
+      const server = statefulMissingSchemaServer(0, { relationScenario: scenario });
+      const { calls, fetchImpl } = mockFetch(server.router);
+      const result = await runSchemaTool({
+        argv: requiredArgs(['--apply', '--test-suffix', TEST_SUFFIX]),
+        fetchImpl,
+        env: credentialEnv(),
+        now: () => NOW
+      });
+      expect(result.receipt.haltReason.code).toBe('CREATE_ACCEPTED_READBACK_PENDING');
+      expect(calls.filter((call) =>
+        call.method === 'POST' && call.url.pathname === '/associations/relations'
+      )).toHaveLength(1);
+      expect(result.receipt.acceptedCreates.filter((entry: any) =>
+        entry.resource === 'testRelation'
+      )).toHaveLength(1);
+      expect(result.receipt.completed.some((entry: any) =>
+        entry.resource === 'testRelation'
+      )).toBe(false);
+    }
+  );
+
+  test('halts when both exact relation reads provide different relation IDs', async () => {
+    const server = statefulMissingSchemaServer(0, { relationScenario: 'id-mismatch' });
+    const { calls, fetchImpl } = mockFetch(server.router);
+    const result = await runSchemaTool({
+      argv: requiredArgs(['--apply', '--test-suffix', TEST_SUFFIX]),
+      fetchImpl,
+      env: credentialEnv(),
+      now: () => NOW
+    });
+    expect(result.receipt.haltReason.code).toBe('RELATION_READBACK_ID_MISMATCH');
+    expect(calls.filter((call) =>
+      call.method === 'POST' && call.url.pathname === '/associations/relations'
+    )).toHaveLength(1);
+    expect(result.receipt.acceptedCreates.filter((entry: any) =>
+      entry.resource === 'testRelation'
+    )).toHaveLength(1);
+    expect(result.receipt.completed.some((entry: any) =>
+      entry.resource === 'testRelation'
+    )).toBe(false);
+  });
+
+  test('accepts exact two-sided relation proof when only one view provides an ID', async () => {
+    const server = statefulMissingSchemaServer(0, { relationScenario: 'id-missing-homeowner' });
+    const { fetchImpl } = mockFetch(server.router);
+    const result = await runSchemaTool({
+      argv: requiredArgs(['--apply', '--test-suffix', TEST_SUFFIX]),
+      fetchImpl,
+      env: credentialEnv(),
+      now: () => NOW
+    });
+    expect(result.receipt.verdict).toBe('APPLIED');
+    expect(result.receipt.acceptedCreates.filter((entry: any) =>
+      entry.resource === 'testRelation'
+    )).toHaveLength(1);
+    expect(result.receipt.completed.filter((entry: any) =>
+      entry.resource === 'testRelation'
+    )).toHaveLength(1);
+  });
+
+  test('halts a one-sided preexisting relation proof without writing a duplicate', async () => {
+    const server = statefulMissingSchemaServer();
+    const first = mockFetch(server.router);
+    const firstResult = await runSchemaTool({
+      argv: requiredArgs(['--apply', '--test-suffix', TEST_SUFFIX]),
+      fetchImpl: first.fetchImpl,
+      env: credentialEnv(),
+      now: () => NOW
+    });
+    expect(firstResult.receipt.verdict).toBe('APPLIED');
+    server.state.relationScenario = 'empty-assignment';
+    const replay = mockFetch(server.router);
+    const replayResult = await runSchemaTool({
+      argv: requiredArgs(['--apply', '--test-suffix', TEST_SUFFIX]),
+      fetchImpl: replay.fetchImpl,
+      env: credentialEnv(),
+      now: () => NOW
+    });
+    expect(replayResult.receipt.haltReason.code).toBe('RELATION_TWO_SIDED_PROOF_FAILED');
+    expect(replay.calls.filter((call) =>
+      call.method === 'POST' &&
+      call.url.pathname !== '/contacts/search' &&
+      !call.url.pathname.endsWith('/records/search')
+    )).toEqual([]);
+    expect(server.state.writeLog).toHaveLength(75);
+  });
 
   test('reports an accepted partial TEST graph separately from readback-verified creates', async () => {
     const server = statefulMissingSchemaServer(0, {
@@ -1691,6 +1939,8 @@ describe('RestoreRadar guarded CRM schema apply tool', () => {
       manifest,
       [{
         id: 'primary',
+        name: 'RR Assignment ID',
+        dataType: 'TEXT',
         objectKey: 'custom_object.rr_lead_assignment',
         fieldKey: 'custom_object.rr_lead_assignment.rr_assignment_id'
       }],
@@ -1706,6 +1956,8 @@ describe('RestoreRadar guarded CRM schema apply tool', () => {
       manifest,
       [{
         id: 'primary',
+        name: 'RR Assignment ID',
+        dataType: 'TEXT',
         objectKey: 'custom_object.rr_lead_assignment',
         fieldKey: 'custom_object.rr_lead_assignment.rr_assignment_id'
       }],

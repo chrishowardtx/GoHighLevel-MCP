@@ -604,8 +604,33 @@ function findAssociation(associations, expected) {
 
 function customObjectV2NamespaceFromReadback(manifest, v2Fields, v2Folders) {
   const allowed = /^custom_objects?\.rr_lead_assignment$/;
+  const primary = manifest.customObject.primaryDisplayPropertyDetails;
+  const primarySuffix = String(primary.key).split('.').pop();
+  const primaryCandidates = v2Fields.filter((field) =>
+    field?.name === primary.name ||
+    String(field?.fieldKey || '').endsWith(`.${primarySuffix}`)
+  );
+  if (!primaryCandidates.length) {
+    return { state: 'unknown', reason: 'Primary RR Assignment ID field was not exposed by V2 readback' };
+  }
+  if (primaryCandidates.length !== 1) {
+    return { state: 'collision', reason: 'Primary RR Assignment ID field evidence was ambiguous' };
+  }
+  const primaryField = primaryCandidates[0];
+  const expectedPrimaryFieldKey = `${primaryField?.objectKey}.${primarySuffix}`;
+  if (
+    !primaryField?.id ||
+    primaryField.name !== primary.name ||
+    primaryField.dataType !== primary.dataType ||
+    !allowed.test(String(primaryField.objectKey || '')) ||
+    primaryField.fieldKey !== expectedPrimaryFieldKey
+  ) {
+    return {
+      state: 'collision',
+      reason: 'Primary RR Assignment ID field did not match the exact ID/name/type/objectKey/fieldKey contract'
+    };
+  }
   const evidence = [];
-  let primaryFieldSeen = false;
   for (const field of v2Fields) {
     if (typeof field?.objectKey === 'string' && field.objectKey) {
       evidence.push({ source: `field.objectKey:${field.id || 'unknown'}`, value: field.objectKey });
@@ -617,7 +642,6 @@ function customObjectV2NamespaceFromReadback(manifest, v2Fields, v2Folders) {
       }
       const objectKey = field.fieldKey.slice(0, separator);
       evidence.push({ source: `field.fieldKey:${field.id || 'unknown'}`, value: objectKey });
-      if (field.fieldKey.endsWith('.rr_assignment_id')) primaryFieldSeen = true;
     }
   }
   for (const folder of v2Folders) {
@@ -625,7 +649,7 @@ function customObjectV2NamespaceFromReadback(manifest, v2Fields, v2Folders) {
       evidence.push({ source: `folder.objectKey:${folder.id || 'unknown'}`, value: folder.objectKey });
     }
   }
-  if (!evidence.length || !primaryFieldSeen) return { state: 'unknown' };
+  if (!evidence.length) return { state: 'unknown' };
   const invalid = evidence.find((entry) => !allowed.test(entry.value));
   const keys = [...new Set(evidence.map((entry) => entry.value))];
   if (invalid || keys.length !== 1) {
@@ -642,6 +666,27 @@ function customObjectV2NamespaceFromReadback(manifest, v2Fields, v2Folders) {
   };
 }
 
+function reconcileObjectListAndDetails(listMatch, details, manifest) {
+  const directMatch = findObject(
+    [details?.object],
+    manifest.customObject,
+    manifest.identity.locationId
+  );
+  if (directMatch.state !== 'exact') {
+    return {
+      state: 'collision',
+      reason: 'Custom object direct details did not match the exact list contract'
+    };
+  }
+  if (directMatch.value.id !== listMatch.value.id) {
+    return {
+      state: 'collision',
+      reason: 'Custom object list and direct details returned different server IDs'
+    };
+  }
+  return { state: 'exact', value: directMatch.value };
+}
+
 async function discoverSchema(client, manifest, receipt) {
   const pipelines = await readPipelines(client, manifest, receipt);
   const legacyFields = await readLegacyFields(client, manifest, receipt, 'all');
@@ -651,15 +696,19 @@ async function discoverSchema(client, manifest, receipt) {
   const objectMatch = findObject(objects, manifest.customObject, manifest.identity.locationId);
   let customV2 = { fields: [], folders: [] };
   let objectDetails = null;
+  let objectDetailsMatch = { state: 'unknown' };
   let customV2Namespace = { state: 'unknown' };
   if (objectMatch.state === 'exact') {
     customV2 = await readV2Fields(client, manifest, receipt, objectMatch.value.key);
     objectDetails = await readObjectDetails(client, manifest, receipt, objectMatch.value.key);
-    customV2Namespace = customObjectV2NamespaceFromReadback(
-      manifest,
-      customV2.fields,
-      customV2.folders
-    );
+    objectDetailsMatch = reconcileObjectListAndDetails(objectMatch, objectDetails, manifest);
+    if (objectDetailsMatch.state === 'exact') {
+      customV2Namespace = customObjectV2NamespaceFromReadback(
+        manifest,
+        customV2.fields,
+        customV2.folders
+      );
+    }
   }
   return {
     pipelines,
@@ -670,6 +719,7 @@ async function discoverSchema(client, manifest, receipt) {
     objectMatch,
     customV2,
     objectDetails,
+    objectDetailsMatch,
     customV2Namespace
   };
 }
@@ -752,7 +802,12 @@ function planSchema(manifest, discovery) {
   });
 
   if (discovery.objectMatch.state === 'exact') {
-    if (discovery.customV2Namespace.state === 'collision') {
+    if (discovery.objectDetailsMatch.state !== 'exact') {
+      plan.blockers.push({
+        resource: 'customObjectDirectReadback',
+        reason: discovery.objectDetailsMatch.reason || 'Custom object list/direct reconciliation was not proven'
+      });
+    } else if (discovery.customV2Namespace.state === 'collision') {
       plan.blockers.push({
         resource: 'customObjectFieldPrefix',
         reason: discovery.customV2Namespace.reason
@@ -763,32 +818,37 @@ function planSchema(manifest, discovery) {
         reason: 'Server readback did not expose a usable custom-object field prefix'
       });
     }
-    const customFolderMatch = findFolder(
-      discovery.customV2.folders,
-      discovery.customV2Namespace.writeObjectKey,
-      manifest.customObject.folder
-    );
-    addPlanResult(
-      plan,
-      customFolderMatch,
-      {
-        resource: 'customObjectFieldFolder',
-        key: manifest.customObject.folder,
-        method: 'POST',
-        path: '/custom-fields/folder'
+    if (
+      discovery.objectDetailsMatch.state === 'exact' &&
+      discovery.customV2Namespace.state === 'exact'
+    ) {
+      const customFolderMatch = findFolder(
+        discovery.customV2.folders,
+        discovery.customV2Namespace.writeObjectKey,
+        manifest.customObject.folder
+      );
+      addPlanResult(
+        plan,
+        customFolderMatch,
+        {
+          resource: 'customObjectFieldFolder',
+          key: manifest.customObject.folder,
+          method: 'POST',
+          path: '/custom-fields/folder'
+        }
+      );
+      for (const field of manifest.customObject.fields) {
+        addPlanResult(plan, findV2Field(discovery.customV2.fields, field, {
+          bySuffix: true,
+          objectKey: discovery.customV2Namespace.writeObjectKey,
+          parentId: customFolderMatch.value?.id
+        }), {
+          resource: 'customObjectField',
+          key: field.suffix,
+          method: 'POST',
+          path: '/custom-fields/'
+        });
       }
-    );
-    for (const field of manifest.customObject.fields) {
-      addPlanResult(plan, findV2Field(discovery.customV2.fields, field, {
-        bySuffix: true,
-        objectKey: discovery.customV2Namespace.writeObjectKey,
-        parentId: customFolderMatch.value?.id
-      }), {
-        resource: 'customObjectField',
-        key: field.suffix,
-        method: 'POST',
-        path: '/custom-fields/'
-      });
     }
   } else if (discovery.objectMatch.state === 'missing') {
     plan.notProven.push(
@@ -1706,43 +1766,138 @@ async function readRelations(client, manifest, receipt, recordId, associationId)
   return requireArray(payload, ['relations', 'data.relations'], 'relations', receipt);
 }
 
-async function ensureTestRelation(client, manifest, receipt, association, homeownerId, assignmentId) {
-  let relations = await readRelations(client, manifest, receipt, homeownerId, association.id);
-  let matches = relations.filter((relation) =>
-    relation?.associationId === association.id &&
+function relationPairMatches(relation, homeownerId, assignmentId) {
+  return (
     relation?.firstRecordId === homeownerId &&
     relation?.secondRecordId === assignmentId
+  ) || (
+    relation?.firstRecordId === assignmentId &&
+    relation?.secondRecordId === homeownerId
   );
-  if (matches.length > 1) throw new GuardError('INCOMPATIBLE_COLLISION', 'Duplicate TEST relations exist');
-  if (matches.length === 1) return matches[0];
+}
+
+function evaluateTwoSidedRelationProof(
+  homeownerRelations,
+  assignmentRelations,
+  associationId,
+  homeownerId,
+  assignmentId
+) {
+  const exactMatches = (relations) => relations.filter((relation) =>
+    relation?.associationId === associationId &&
+    relationPairMatches(relation, homeownerId, assignmentId)
+  );
+  const homeownerMatches = exactMatches(homeownerRelations);
+  const assignmentMatches = exactMatches(assignmentRelations);
+  if (homeownerMatches.length > 1 || assignmentMatches.length > 1) {
+    return { state: 'collision', code: 'INCOMPATIBLE_COLLISION', reason: 'Duplicate TEST relations exist' };
+  }
+  if (homeownerMatches.length === 1 && assignmentMatches.length === 1) {
+    const homeownerMatch = homeownerMatches[0];
+    const assignmentMatch = assignmentMatches[0];
+    if (
+      homeownerMatch.id &&
+      assignmentMatch.id &&
+      homeownerMatch.id !== assignmentMatch.id
+    ) {
+      return {
+        state: 'collision',
+        code: 'RELATION_READBACK_ID_MISMATCH',
+        reason: 'Two-sided relation readback returned different relation IDs'
+      };
+    }
+    return { state: 'exact', value: homeownerMatch };
+  }
+  const targetRelevant = [...homeownerRelations, ...assignmentRelations].some((relation) =>
+    relation?.associationId === associationId ||
+    relationPairMatches(relation, homeownerId, assignmentId)
+  );
+  if (homeownerMatches.length || assignmentMatches.length || targetRelevant) {
+    return {
+      state: 'unproven',
+      code: 'RELATION_TWO_SIDED_PROOF_FAILED',
+      reason: 'Both record-side reads did not expose exactly one matching TEST relation'
+    };
+  }
+  return { state: 'missing' };
+}
+
+async function readTwoSidedRelationProof(
+  client,
+  manifest,
+  receipt,
+  associationId,
+  homeownerId,
+  assignmentId
+) {
+  const homeownerRelations = await readRelations(
+    client,
+    manifest,
+    receipt,
+    homeownerId,
+    associationId
+  );
+  const assignmentRelations = await readRelations(
+    client,
+    manifest,
+    receipt,
+    assignmentId,
+    associationId
+  );
+  return evaluateTwoSidedRelationProof(
+    homeownerRelations,
+    assignmentRelations,
+    associationId,
+    homeownerId,
+    assignmentId
+  );
+}
+
+async function ensureTestRelation(client, manifest, receipt, association, homeownerId, assignmentId) {
+  const initialProof = await readTwoSidedRelationProof(
+    client,
+    manifest,
+    receipt,
+    association.id,
+    homeownerId,
+    assignmentId
+  );
+  if (initialProof.state === 'exact') return initialProof.value;
+  if (initialProof.state !== 'missing') {
+    throw new GuardError(initialProof.code, initialProof.reason);
+  }
   const body = {
     locationId: manifest.identity.locationId,
     associationId: association.id,
     firstRecordId: homeownerId,
     secondRecordId: assignmentId
   };
-  const created = requireCreatedResource(
-    await client.request('POST', '/associations/relations', {
-      mutating: true,
-      expectedStatus: 201,
-      receiptResource: 'testRelation',
-      receiptKey: `${homeownerId}:${assignmentId}`,
-      body
-    }),
-    ['relation', 'data.relation', '$'],
-    'TEST relation',
-    receipt
+  await client.request('POST', '/associations/relations', {
+    mutating: true,
+    expectedStatus: 201,
+    receiptResource: 'testRelation',
+    receiptKey: `${homeownerId}:${assignmentId}`,
+    body
+  });
+  const createdProof = await readTwoSidedRelationProof(
+    client,
+    manifest,
+    receipt,
+    association.id,
+    homeownerId,
+    assignmentId
   );
-  relations = await readRelations(client, manifest, receipt, homeownerId, association.id);
-  matches = relations.filter((relation) =>
-    relation?.associationId === association.id &&
-    relation?.firstRecordId === homeownerId &&
-    relation?.secondRecordId === assignmentId
-  );
-  if (matches.length !== 1) throw new GuardError('CREATE_READBACK_FAILED', 'TEST relation was not confirmed');
-  requireMatchingCreatedId(created, matches[0], 'TEST relation');
+  if (createdProof.state !== 'exact') {
+    if (createdProof.state === 'collision') {
+      throw new GuardError(createdProof.code, createdProof.reason);
+    }
+    throw new GuardError(
+      'CREATE_ACCEPTED_READBACK_PENDING',
+      'Relation create was accepted but two-sided exact readback was not proven'
+    );
+  }
   recordCompletedCreate(receipt, 'testRelation', `${homeownerId}:${assignmentId}`, '/associations/relations');
-  return matches[0];
+  return createdProof.value;
 }
 
 function legacyFieldIdMap(fields, model) {
