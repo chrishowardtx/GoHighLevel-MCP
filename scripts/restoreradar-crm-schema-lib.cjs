@@ -1989,12 +1989,38 @@ async function searchObjectRecord(client, manifest, receipt, schemaKey, query) {
     body: {
       locationId: manifest.identity.locationId,
       page: 1,
-      pageLimit: 10,
+      pageLimit: 100,
       query,
       searchAfter: []
     }
   });
-  return requireArray(payload, ['records', 'data.records'], `records.${schemaKey}`, receipt);
+  const records = requireArray(
+    payload,
+    ['records', 'data.records'],
+    `records.${schemaKey}`,
+    receipt
+  );
+  const supportedTotals = ['total', 'data.total']
+    .map((responsePath) => atPath(payload, responsePath))
+    .filter((value) => value !== undefined);
+  if (
+    !supportedTotals.length ||
+    supportedTotals.some((value) => !Number.isSafeInteger(value) || value < 0) ||
+    new Set(supportedTotals).size !== 1
+  ) {
+    throw new GuardError(
+      'OBJECT_RECORD_SEARCH_TOTAL_INVALID',
+      'Object-record search did not expose one supported non-negative integer total'
+    );
+  }
+  const total = supportedTotals[0];
+  if (total !== records.length) {
+    throw new GuardError(
+      'OBJECT_RECORD_SEARCH_INCOMPLETE',
+      `Object-record search returned ${records.length} of ${total} records`
+    );
+  }
+  return records;
 }
 
 async function ensureTestAssignment(client, manifest, receipt, externalId, payload) {
@@ -2009,20 +2035,27 @@ async function ensureTestAssignment(client, manifest, receipt, externalId, paylo
       'Assignment verification record must use the canonical TEST and Queued option keys'
     );
   }
-  const query = `rr_assignment_id:${externalId}`;
-  let records = await searchObjectRecord(
+  const query = externalId;
+  const records = await searchObjectRecord(
     client,
     manifest,
     receipt,
     manifest.customObject.key,
     query
   );
-  let matches = records.filter((record) =>
-    record?.properties?.rr_assignment_id === externalId &&
+  const targetRecords = records.filter((record) =>
+    record?.properties?.rr_assignment_id === externalId
+  );
+  if (targetRecords.some((record) => !record?.id || typeof record.id !== 'string')) {
+    throw new GuardError(
+      'INCOMPATIBLE_COLLISION',
+      'Existing TEST assignment search result has no stable record ID'
+    );
+  }
+  const matches = targetRecords.filter((record) =>
     propertiesMatch(record.properties, payload.properties)
   );
-  const sameIdIncompatible = records.some((record) =>
-    record?.properties?.rr_assignment_id === externalId &&
+  const sameIdIncompatible = targetRecords.some((record) =>
     !propertiesMatch(record.properties, payload.properties)
   );
   if (sameIdIncompatible) {

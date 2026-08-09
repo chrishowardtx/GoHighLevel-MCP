@@ -45,7 +45,8 @@ workflow, channel, or homeowner communication configuration.
 - [Custom Fields V2](https://marketplace.gohighlevel.com/docs/ghl/custom-fields/create-custom-field/)
 - [Custom Field V2 folders](https://marketplace.gohighlevel.com/docs/ghl/custom-fields/create-custom-field-folder/)
 - [Create custom object](https://marketplace.gohighlevel.com/docs/ghl/objects/create-custom-object-schema/)
-- [Create/search object records](https://marketplace.gohighlevel.com/docs/ghl/objects/create-object-record/)
+- [Create object record](https://marketplace.gohighlevel.com/docs/ghl/objects/create-object-record/)
+- [Search object records](https://marketplace.gohighlevel.com/docs/ghl/objects/search-object-records/index.html)
 - [Create association](https://marketplace.gohighlevel.com/docs/ghl/associations/create-association/)
 - [Create relation](https://marketplace.gohighlevel.com/docs/ghl/associations/create-relation/)
 - [Create contact](https://marketplace.gohighlevel.com/docs/ghl/contacts/create-contact/)
@@ -108,6 +109,16 @@ HighLevel split the unchanged full `name` at its first space into `firstName:
 returned the full name lowercased in `contactName`, while direct GET omitted both
 `name` and `contactName`. Direct readback retained exact DND, tags, no channels,
 and all six expected custom fields as `{id, value}`.
+
+A later replay exposed a different live search contract. Searching RR Lead
+Assignment records with `rr_assignment_id:<external-id>` returned zero records,
+so the replay accepted one duplicate TEST assignment with HTTP 201 before
+relation verification halted it from creating another relation. Safe read-only
+probes showed that the plain stable external ID returns both existing records as
+`records` with integer `total: 2`; both records have distinct IDs and identical
+exact properties. The short field-qualified and display-name queries return
+zero, the empty query returns both records, and a fully dotted field query is
+rejected by the API.
 
 ## Fail-closed ambiguities
 
@@ -209,6 +220,17 @@ top level or properties contain email/phone, or if its properties contain any
 unexpected nonempty value. Business discovery uses bounded 100-record requests,
 advances by the accumulated returned count, requires an explicit empty page,
 and halts on missing/repeated record IDs or repeated pages.
+
+Assignment discovery therefore sends the plain `rr_test_assignment_<suffix>`
+external ID as `query` with `page: 1`, `pageLimit: 100`, and an empty
+`searchAfter`. The response must expose a supported non-negative integer
+`total`, and `total` must equal the returned `records.length`; a missing,
+non-integer, conflicting, or truncated total halts before any create. Only then
+does the tool filter the exact `properties.rr_assignment_id` and compare the
+complete expected nonempty property set. One exact stable-ID record is reused.
+An incompatible same-ID record, a record without a stable server ID, or two
+exact duplicates is an incompatible collision and cannot trigger another POST.
+An exact clean-suffix replay performs zero mutations.
 
 V2 field readback is exact only when the server supplies a field ID and the
 field is under the resolved object namespace and intended RR folder ID. A
