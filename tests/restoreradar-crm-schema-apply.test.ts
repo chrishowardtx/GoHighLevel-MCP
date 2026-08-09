@@ -1,3 +1,5 @@
+const fs = require('node:fs');
+
 const {
   DEFAULT_READBACK_RETRY_DELAYS_MS,
   HighLevelClient,
@@ -2526,5 +2528,42 @@ describe('RestoreRadar guarded CRM schema apply tool', () => {
       expect(JSON.stringify(payload)).not.toMatch(/ipAddress|userAgent|rawNarrative|homeownerNarrative/);
     }
     expect(JSON.stringify({ contacts, business, opportunities, assignment })).not.toContain(TOKEN);
+  });
+
+  test.each([
+    ['V2 environment', 'v2EnvironmentOptionKey', 'production'],
+    ['assignment state', 'assignmentStateOptionKey', 'sent']
+  ])('blocks a manifest-drifted TEST %s value independently of the payload builder', async (
+    _label,
+    manifestKey,
+    unsafeValue
+  ) => {
+    const driftedManifest = JSON.parse(JSON.stringify(loadManifest()));
+    driftedManifest.testRecords[manifestKey] = unsafeValue;
+    const virtualManifestPath = '/virtual/restoreradar-option-drift.json';
+    const realReadFileSync = fs.readFileSync;
+    const readFileSpy = jest.spyOn(fs, 'readFileSync').mockImplementation(
+      (filePath: any, encoding: any) => filePath === virtualManifestPath
+        ? JSON.stringify(driftedManifest)
+        : realReadFileSync(filePath, encoding)
+    );
+    try {
+      const { calls, fetchImpl } = mockFetch(completeRouter);
+      const result = await runSchemaTool({
+        argv: requiredArgs(['--apply', '--test-suffix', TEST_SUFFIX]),
+        fetchImpl,
+        env: credentialEnv(),
+        now: () => NOW,
+        manifestPath: virtualManifestPath
+      });
+      expect(result.receipt.haltReason.code).toBe('TEST_RECORD_GUARD');
+      expect(calls.filter((call) =>
+        call.method === 'POST' &&
+        call.url.pathname !== '/contacts/search' &&
+        !call.url.pathname.endsWith('/records/search')
+      )).toEqual([]);
+    } finally {
+      readFileSpy.mockRestore();
+    }
   });
 });
