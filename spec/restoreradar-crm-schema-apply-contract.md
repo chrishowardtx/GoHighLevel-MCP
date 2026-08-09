@@ -49,6 +49,8 @@ workflow, channel, or homeowner communication configuration.
 - [Create association](https://marketplace.gohighlevel.com/docs/ghl/associations/create-association/)
 - [Create relation](https://marketplace.gohighlevel.com/docs/ghl/associations/create-relation/)
 - [Create contact](https://marketplace.gohighlevel.com/docs/ghl/contacts/create-contact/)
+- [Search contacts](https://marketplace.gohighlevel.com/docs/ghl/contacts/search-contacts-advanced/)
+- [Get contact](https://marketplace.gohighlevel.com/docs/ghl/contacts/get-contact/)
 - [Create opportunity](https://marketplace.gohighlevel.com/docs/ghl/opportunities/create-opportunity/)
 - [Business API](https://marketplace.gohighlevel.com/docs/ghl/businesses/businesses/)
 
@@ -97,6 +99,15 @@ without email, phone, firstName and lastName are not allowed.` The tool therefor
 retains the deterministic full `name` and also sends deterministic `firstName`
 and `lastName` values for each unmistakable TEST Contact. No email or phone is
 added.
+
+The next controlled retry accepted exactly one homeowner TEST Contact with HTTP
+201 and halted before any other TEST write when exact readback could not prove
+the full name. A safe read-only probe then established the live representation:
+HighLevel split the unchanged full `name` at its first space into `firstName:
+"RR"` and `lastName: "TEST Homeowner <test-suffix>"`; search omitted `name` and
+returned the full name lowercased in `contactName`, while direct GET omitted both
+`name` and `contactName`. Direct readback retained exact DND, tags, no channels,
+and all six expected custom fields as `{id, value}`.
 
 ## Fail-closed ambiguities
 
@@ -153,14 +164,23 @@ canonical `test` option key whose label is `TEST`. Homeowner consent is
 with the `queued` option key whose label is `Queued`; Resend IDs and
 sent/delivered timestamps are absent.
 
-Each TEST Contact uses `firstName: "RR TEST"`. The homeowner uses `lastName:
-"Homeowner <test-suffix>"`; the provider Contact uses `lastName: "Provider
-Contact <test-suffix>"`. Its full `name` must be the exact concatenation of
-`firstName`, one space, and `lastName`. The pre-dispatch TEST-record guard
-requires all three values, global DND, and the absence of email and phone. Exact
-list/direct readback requires the same contract. A missing or changed first
-name, last name, or full name is an incompatible collision, so replay cannot
-silently adopt a differently named Contact.
+Each TEST Contact therefore uses `firstName: "RR"`. The homeowner uses
+`lastName: "TEST Homeowner <test-suffix>"`; the provider Contact uses
+`lastName: "TEST Provider Contact <test-suffix>"`. The unchanged full `name`
+must be the exact concatenation of `firstName`, one space, and `lastName`. The
+pre-dispatch TEST-record guard requires all three values, global DND, and the
+absence of email and phone.
+
+Contact discovery/readback resolves full-name evidence from the recognized
+`name` and `contactName` fields plus the name derived from `firstName` and
+`lastName`. HighLevel's lowercase search-index `contactName` is compared by
+lowercased semantic equality; first and last names remain case-exact. Missing
+`name`/`contactName` on direct GET is accepted only when the exact split fields
+derive the expected full name. Conflicting recognized or derived values,
+partial split fields, an unresolvable search result, duplicate matches, or a
+missing search ID is an incompatible collision. This allows a stable retry to
+recover the already-accepted homeowner without another POST while preventing a
+differently named Contact from being adopted.
 
 Before dispatch, each TEST Contact custom-field request item is independently
 guarded as an exact, unique `{id, fieldValue}` pair. Neither the response-only

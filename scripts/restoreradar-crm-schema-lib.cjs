@@ -1356,10 +1356,10 @@ async function applySchema(locationClient, manifest, receipt) {
 }
 
 function testIds(suffix) {
-  const homeownerFirstName = 'RR TEST';
-  const homeownerLastName = `Homeowner ${suffix}`;
-  const providerFirstName = 'RR TEST';
-  const providerLastName = `Provider Contact ${suffix}`;
+  const homeownerFirstName = 'RR';
+  const homeownerLastName = `TEST Homeowner ${suffix}`;
+  const providerFirstName = 'RR';
+  const providerLastName = `TEST Provider Contact ${suffix}`;
   return {
     homeownerExternalId: `rr_test_homeowner_${suffix}`,
     providerExternalId: `rr_test_provider_${suffix}`,
@@ -1556,8 +1556,8 @@ function assertNoProhibitedPayloadData(payload, manifest) {
 
 function assertTestContact(payload) {
   if (
-    payload?.firstName !== 'RR TEST' ||
-    !/^(Homeowner|Provider Contact) \d{8}T\d{6}Z$/.test(payload?.lastName || '') ||
+    payload?.firstName !== 'RR' ||
+    !/^TEST (Homeowner|Provider Contact) \d{8}T\d{6}Z$/.test(payload?.lastName || '') ||
     payload?.name !== `${payload.firstName} ${payload.lastName}` ||
     payload.dnd !== true
   ) {
@@ -1590,12 +1590,78 @@ function assertTestContact(payload) {
   }
 }
 
-async function searchContact(client, manifest, receipt, name) {
+function resolveContactFullName(contact) {
+  const candidates = [];
+  for (const key of ['name', 'contactName']) {
+    const value = contact?.[key];
+    if (value === undefined || value === null || value === '') continue;
+    if (typeof value !== 'string') {
+      throw new GuardError(
+        'INCOMPATIBLE_COLLISION',
+        `TEST contact ${key} readback is not a string`
+      );
+    }
+    candidates.push({ key, value });
+  }
+
+  const firstNamePresent = contact?.firstName !== undefined &&
+    contact?.firstName !== null && contact?.firstName !== '';
+  const lastNamePresent = contact?.lastName !== undefined &&
+    contact?.lastName !== null && contact?.lastName !== '';
+  let derivedFullName = null;
+  if (firstNamePresent || lastNamePresent) {
+    if (
+      typeof contact?.firstName !== 'string' || !contact.firstName ||
+      typeof contact?.lastName !== 'string' || !contact.lastName
+    ) {
+      throw new GuardError(
+        'INCOMPATIBLE_COLLISION',
+        'TEST contact split-name readback is incomplete or invalid'
+      );
+    }
+    derivedFullName = `${contact.firstName} ${contact.lastName}`;
+    candidates.push({ key: 'firstName+lastName', value: derivedFullName });
+  }
+
+  if (!candidates.length) return null;
+  const normalizedNames = new Set(candidates.map(({ value }) => value.toLowerCase()));
+  if (normalizedNames.size !== 1) {
+    throw new GuardError(
+      'INCOMPATIBLE_COLLISION',
+      'TEST contact full-name readback fields conflict'
+    );
+  }
+  return derivedFullName || candidates[0].value;
+}
+
+async function searchContact(client, manifest, receipt, expected) {
+  const name = expected.name;
   const payload = await client.request('POST', '/contacts/search', {
     body: { locationId: manifest.identity.locationId, pageLimit: 25, query: name }
   });
   const contacts = requireArray(payload, ['contacts', 'data.contacts'], 'contacts.search', receipt)
-    .filter((contact) => contact?.name === name);
+    .filter((contact) => {
+      const resolvedName = resolveContactFullName(contact);
+      if (!resolvedName) {
+        throw new GuardError(
+          'INCOMPATIBLE_COLLISION',
+          `TEST contact search for ${name} returned an unresolvable name`
+        );
+      }
+      if (resolvedName.toLowerCase() !== name.toLowerCase()) {
+        throw new GuardError(
+          'INCOMPATIBLE_COLLISION',
+          `TEST contact search for ${name} returned incompatible name evidence`
+        );
+      }
+      if (!contact?.id || typeof contact.id !== 'string') {
+        throw new GuardError(
+          'INCOMPATIBLE_COLLISION',
+          `TEST contact search for ${name} returned no stable contact ID`
+        );
+      }
+      return true;
+    });
   if (contacts.length > 1) throw new GuardError('INCOMPATIBLE_COLLISION', `Multiple TEST contacts named ${name}`);
   return contacts[0] || null;
 }
@@ -1666,7 +1732,8 @@ function exactTestContactReadback(contact, expected) {
   const tags = Array.isArray(contact?.tags) ? contact.tags : [];
   const expectedTags = [...new Set(expected.tags)].sort();
   const actualTags = [...new Set(tags)].sort();
-  return contact?.name === expected.name &&
+  const resolvedName = resolveContactFullName(contact);
+  return resolvedName?.toLowerCase() === expected.name.toLowerCase() &&
     contact?.firstName === expected.firstName &&
     contact?.lastName === expected.lastName &&
     contact?.dnd === true &&
@@ -1679,7 +1746,7 @@ function exactTestContactReadback(contact, expected) {
 async function ensureTestContact(client, manifest, receipt, name, payload) {
   assertTestContact(payload);
   assertNoProhibitedPayloadData(payload, manifest);
-  let contact = await searchContact(client, manifest, receipt, name);
+  let contact = await searchContact(client, manifest, receipt, payload);
   if (contact) {
     const readback = await readContact(client, receipt, contact.id);
     if (!exactTestContactReadback(readback, payload)) {
@@ -2443,6 +2510,7 @@ module.exports = {
   parseArgs,
   planSchema,
   readBusinesses,
+  resolveContactFullName,
   resolveCredential,
   runSchemaTool,
   testIds,
