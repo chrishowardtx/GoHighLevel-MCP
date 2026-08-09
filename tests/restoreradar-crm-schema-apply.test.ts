@@ -8,6 +8,7 @@ const {
   createReceipt,
   customObjectV2NamespaceFromReadback,
   loadManifest,
+  readBusinesses,
   runSchemaTool,
   testIds,
   timestampFromTestSuffix
@@ -156,6 +157,7 @@ function completeFixture() {
   const businessFields = manifest.business.fields.map((field: any, index: number) => ({
     id: `business_field_${index}`,
     objectKey: manifest.business.objectKey,
+    parentId: businessFolder.id,
     ...field,
     options: field.options || []
   }));
@@ -197,6 +199,7 @@ function completeFixture() {
       name: field.name,
       fieldKey: `custom_object.rr_lead_assignment.${field.suffix}`,
       objectKey: 'custom_object.rr_lead_assignment',
+      parentId: customFolder.id,
       dataType: field.dataType,
       options: field.options || []
     }))
@@ -217,8 +220,22 @@ function completeFixture() {
   };
 }
 
-function completeRouter(call: FetchCall) {
+function completeRouter(call: FetchCall, overrides: {
+  wrongBusinessFolder?: boolean;
+  unsafeRecord?:
+    | 'contact'
+    | 'opportunity'
+    | 'assignment'
+    | 'business-top-channel'
+    | 'business-property-channel'
+    | 'business-extra'
+    | 'business-prohibited';
+} = {}) {
   const fixture = completeFixture();
+  if (overrides.wrongBusinessFolder) {
+    const field = fixture.businessFields.find((entry: any) => entry.name.startsWith('RR |'));
+    field.parentId = 'wrong_folder';
+  }
   const { manifest } = fixture;
   const pathname = call.url.pathname;
   const ids = testIds(TEST_SUFFIX);
@@ -315,16 +332,50 @@ function completeRouter(call: FetchCall) {
     return jsonResponse({ contacts: [contact] });
   }
   if (call.method === 'GET' && pathname === '/contacts/contact_homeowner') {
-    return jsonResponse({ contact: { id: 'contact_homeowner', ...contactPayloads.homeowner } });
+    const contact: any = { id: 'contact_homeowner', ...contactPayloads.homeowner };
+    contact.customFields = [
+      ...contact.customFields,
+      { id: 'empty_contact_placeholder', fieldValue: '' }
+    ];
+    if (overrides.unsafeRecord === 'contact') {
+      contact.customFields = [
+        ...contact.customFields,
+        { id: 'unexpected_contact_field', fieldValue: 'UNEXPECTED_NONEMPTY' }
+      ];
+    }
+    return jsonResponse({ contact });
   }
   if (call.method === 'GET' && pathname === '/contacts/contact_provider') {
-    return jsonResponse({ contact: { id: 'contact_provider', ...contactPayloads.provider } });
+    return jsonResponse({
+      contact: {
+        id: 'contact_provider',
+        ...contactPayloads.provider,
+        customFields: [
+          ...contactPayloads.provider.customFields,
+          { id: 'empty_contact_placeholder', fieldValue: '' }
+        ]
+      }
+    });
   }
   if (call.method === 'GET' && pathname === '/businesses/') {
     return jsonResponse({ businesses: [{ id: 'business_test', name: ids.businessName }] });
   }
   if (call.method === 'GET' && pathname === '/objects/business/records/business_test') {
-    return jsonResponse({ record: { id: 'business_test', properties: businessPayload.properties } });
+    const record: any = {
+      id: 'business_test',
+      properties: { ...businessPayload.properties, rr_empty_placeholder: '' }
+    };
+    if (overrides.unsafeRecord === 'business-top-channel') record.email = 'unsafe@example.test';
+    if (overrides.unsafeRecord === 'business-property-channel') {
+      record.properties.phone = '+15550000000';
+    }
+    if (overrides.unsafeRecord === 'business-extra') {
+      record.properties.rr_unexpected_projection = 'UNEXPECTED_NONEMPTY';
+    }
+    if (overrides.unsafeRecord === 'business-prohibited') {
+      record.properties.userAgent = 'UNEXPECTED_NONEMPTY';
+    }
+    return jsonResponse({ record });
   }
   if (call.method === 'GET' && pathname === '/opportunities/search') {
     const name = call.url.searchParams.get('q');
@@ -335,23 +386,48 @@ function completeRouter(call: FetchCall) {
     return jsonResponse({ opportunities: [{ id, name, pipelineId }] });
   }
   if (call.method === 'GET' && pathname === '/opportunities/opportunity_homeowner') {
+    const opportunity: any = { id: 'opportunity_homeowner', ...opportunityPayloads.homeowner };
+    opportunity.customFields = [
+      ...opportunity.customFields,
+      { id: 'empty_opportunity_placeholder', fieldValue: '' }
+    ];
+    if (overrides.unsafeRecord === 'opportunity') {
+      opportunity.customFields = [
+        ...opportunity.customFields,
+        { id: 'unexpected_opportunity_field', fieldValue: 'UNEXPECTED_NONEMPTY' }
+      ];
+    }
     return jsonResponse({
-      opportunity: { id: 'opportunity_homeowner', ...opportunityPayloads.homeowner }
+      opportunity
     });
   }
   if (call.method === 'GET' && pathname === '/opportunities/opportunity_provider') {
     return jsonResponse({
-      opportunity: { id: 'opportunity_provider', ...opportunityPayloads.provider }
+      opportunity: {
+        id: 'opportunity_provider',
+        ...opportunityPayloads.provider,
+        customFields: [
+          ...opportunityPayloads.provider.customFields,
+          { id: 'empty_opportunity_placeholder', fieldValue: '' }
+        ]
+      }
     });
   }
   if (
     call.method === 'POST' &&
     pathname === `/objects/${manifest.customObject.key}/records/search`
   ) {
+    const properties: any = {
+      ...assignmentPayload.properties,
+      rr_empty_placeholder: ''
+    };
+    if (overrides.unsafeRecord === 'assignment') {
+      properties.rr_unexpected_projection = 'UNEXPECTED_NONEMPTY';
+    }
     return jsonResponse({
       records: [{
         id: 'assignment_test',
-        properties: assignmentPayload.properties
+        properties
       }]
     });
   }
@@ -714,6 +790,70 @@ describe('RestoreRadar guarded CRM schema apply tool', () => {
     expect(calls.every((call) => call.method === 'GET')).toBe(true);
   });
 
+  test('treats a V2 field under the wrong parent folder as a collision', async () => {
+    const { calls, fetchImpl } = mockFetch((call) =>
+      completeRouter(call, { wrongBusinessFolder: true })
+    );
+    const result = await runSchemaTool({
+      argv: requiredArgs(),
+      fetchImpl,
+      env: credentialEnv(),
+      now: () => NOW
+    });
+    expect(result.receipt.haltReason.code).toBe('SCHEMA_PLAN_HALTED');
+    expect(result.receipt.collisions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ resource: 'businessField' })
+    ]));
+    expect(calls.every((call) => call.method === 'GET')).toBe(true);
+  });
+
+  test.each([
+    'contact',
+    'opportunity',
+    'assignment',
+    'business-top-channel',
+    'business-property-channel',
+    'business-extra',
+    'business-prohibited'
+  ])('rejects unsafe nonempty values on an existing TEST %s record', async (unsafeRecord: any) => {
+    const { calls, fetchImpl } = mockFetch((call) => completeRouter(call, { unsafeRecord }));
+    const result = await runSchemaTool({
+      argv: requiredArgs(['--apply', '--test-suffix', TEST_SUFFIX]),
+      fetchImpl,
+      env: credentialEnv(),
+      now: () => NOW
+    });
+    expect(result.receipt.verdict).toBe('HALTED');
+    expect(result.receipt.haltReason.code).toBe('INCOMPATIBLE_COLLISION');
+    const semanticReadPosts = [
+      '/contacts/search',
+      `/objects/${loadManifest().customObject.key}/records/search`
+    ];
+    expect(calls.filter((call) =>
+      call.method === 'POST' && !semanticReadPosts.includes(call.url.pathname)
+    )).toEqual([]);
+  });
+
+  test('dry-run explicitly records no TEST reads or writes even when a suffix is supplied', async () => {
+    const { calls, fetchImpl } = mockFetch((call) => emptyDiscoveryRouter(call));
+    const result = await runSchemaTool({
+      argv: requiredArgs(['--test-suffix', TEST_SUFFIX]),
+      fetchImpl,
+      env: credentialEnv(),
+      now: () => NOW
+    });
+    expect(result.receipt.verdict).toBe('READY');
+    expect(result.receipt.testVerification).toEqual({
+      suffix: TEST_SUFFIX,
+      recordsRead: false,
+      recordsWritten: false
+    });
+    expect(result.receipt.notProven.join(' ')).toContain(
+      'No TEST verification records were read or written in dry-run mode'
+    );
+    expect(calls.every((call) => call.method === 'GET')).toBe(true);
+  });
+
   test('pins official paths and endpoint-specific Version v3 on every request', async () => {
     const { calls, fetchImpl } = mockFetch((call) => emptyDiscoveryRouter(call));
     const result = await runSchemaTool({
@@ -869,6 +1009,54 @@ describe('RestoreRadar guarded CRM schema apply tool', () => {
     await expect(location.request('GET', `/companies/${manifest.identity.companyId}`))
       .rejects.toMatchObject({ code: 'READ_ENDPOINT_NOT_ALLOWLISTED' });
     expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  test('paginates Business discovery until a short page', async () => {
+    const manifest = loadManifest();
+    const receipt = createReceipt(manifest, { apply: false }, NOW.toISOString());
+    const firstPage = Array.from({ length: 100 }, (_, index) => ({
+      id: `business_${index}`,
+      name: `Business ${index}`
+    }));
+    const { calls, fetchImpl } = mockFetch((call) => {
+      const skip = Number(call.url.searchParams.get('skip'));
+      return jsonResponse({
+        businesses: skip === 0 ? firstPage : [{ id: 'business_100', name: 'Business 100' }]
+      });
+    });
+    const client = new HighLevelClient({
+      token: TOKEN,
+      fetchImpl,
+      apply: false,
+      receipt,
+      locationId: manifest.identity.locationId,
+      companyId: manifest.identity.companyId,
+      role: 'location'
+    });
+    await expect(readBusinesses(client, manifest, receipt)).resolves.toHaveLength(101);
+    expect(calls.map((call) => call.url.searchParams.get('skip'))).toEqual(['0', '100']);
+  });
+
+  test('halts Business pagination when the API repeats a full page', async () => {
+    const manifest = loadManifest();
+    const receipt = createReceipt(manifest, { apply: false }, NOW.toISOString());
+    const repeated = Array.from({ length: 100 }, (_, index) => ({
+      id: `business_${index}`,
+      name: `Business ${index}`
+    }));
+    const { calls, fetchImpl } = mockFetch(() => jsonResponse({ businesses: repeated }));
+    const client = new HighLevelClient({
+      token: TOKEN,
+      fetchImpl,
+      apply: false,
+      receipt,
+      locationId: manifest.identity.locationId,
+      companyId: manifest.identity.companyId,
+      role: 'location'
+    });
+    await expect(readBusinesses(client, manifest, receipt))
+      .rejects.toMatchObject({ code: 'BUSINESS_PAGINATION_REPEAT' });
+    expect(calls).toHaveLength(2);
   });
 
   test('dual preflights use independent tokens before any schema read', async () => {

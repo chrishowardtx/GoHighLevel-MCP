@@ -40,6 +40,11 @@
   "requests": [],
   "responseShapes": [],
   "notProven": [],
+  "testVerification": {
+    "suffix": "<YYYYMMDDTHHMMSSZ|null>",
+    "recordsRead": false,
+    "recordsWritten": false
+  },
   "safety": {
     "updatesAttempted": 0,
     "deletesAttempted": 0,

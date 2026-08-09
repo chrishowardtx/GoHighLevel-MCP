@@ -15,6 +15,8 @@ The stable suffix makes the TEST record names and external IDs repeatable. A
 rerun reads and validates the exact TEST resources before deciding whether a
 create is necessary. Verification timestamps are derived from that suffix, not
 the wall clock, so the same suffix remains identical across later retries.
+Dry-run never searches or creates TEST records; its receipt records both facts
+explicitly even when a suffix was supplied for preview purposes.
 
 Two credentials are independently required: `GHL_AGENCY_API_KEY` for the
 agency company preflight and custom-object schema create, and
@@ -92,3 +94,16 @@ at `Queued`; Resend IDs and sent/delivered timestamps are absent.
 The projection contains no IP address, user agent, or raw homeowner narrative.
 Only the Contact-to-RR-Lead-Assignment relation is created. Opportunity and
 Business references remain scalar IDs on the assignment record.
+
+Existing TEST contacts and opportunities must have exactly the expected
+nonempty custom-field IDs and values. Empty API placeholders are allowed, but
+any unexpected nonempty custom value collides. Assignment properties follow
+the same rule. A matching TEST Business collides if either its top level or
+properties contain email/phone, a prohibited projection value, or an unexpected
+nonempty `rr_` projection property. Business discovery uses bounded 100-record
+pages and halts on repeated pages or record IDs.
+
+V2 field readback is exact only when the server supplies a field ID and the
+field is under the resolved object namespace and intended RR folder ID. A
+same-name/key field in another folder is an incompatible collision, never an
+idempotent match.

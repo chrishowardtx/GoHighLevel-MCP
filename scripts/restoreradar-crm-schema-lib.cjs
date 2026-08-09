@@ -527,7 +527,7 @@ function findFolder(folders, objectKey, name) {
   return { state: 'exact', value: matches[0] };
 }
 
-function findV2Field(fields, expected, { bySuffix = false } = {}) {
+function findV2Field(fields, expected, { bySuffix = false, objectKey, parentId } = {}) {
   const fieldKeyMatch = (field) => bySuffix
     ? String(field?.fieldKey || '').endsWith(`.${expected.suffix}`)
     : field?.fieldKey === expected.fieldKey;
@@ -535,9 +535,11 @@ function findV2Field(fields, expected, { bySuffix = false } = {}) {
   if (!matches.length) return { state: 'missing' };
   const field = matches[0];
   const exactKey = bySuffix
-    ? String(field?.fieldKey || '').endsWith(`.${expected.suffix}`)
+    ? field?.fieldKey === `${objectKey}.${expected.suffix}`
     : field?.fieldKey === expected.fieldKey;
-  const exact = matches.length === 1 && exactKey &&
+  const exact = matches.length === 1 && Boolean(field?.id) && exactKey &&
+    field.objectKey === objectKey &&
+    field.parentId === parentId &&
     field.name === expected.name &&
     field.dataType === expected.dataType &&
     sameOptions(field.options || [], expected.options || []);
@@ -682,9 +684,14 @@ function planSchema(manifest, discovery) {
     }
   }
 
+  const businessFolderMatch = findFolder(
+    discovery.businessV2.folders,
+    manifest.business.objectKey,
+    manifest.business.folder
+  );
   addPlanResult(
     plan,
-    findFolder(discovery.businessV2.folders, manifest.business.objectKey, manifest.business.folder),
+    businessFolderMatch,
     {
       resource: 'businessFieldFolder',
       key: manifest.business.folder,
@@ -693,7 +700,10 @@ function planSchema(manifest, discovery) {
     }
   );
   for (const field of manifest.business.fields) {
-    addPlanResult(plan, findV2Field(discovery.businessV2.fields, field), {
+    addPlanResult(plan, findV2Field(discovery.businessV2.fields, field, {
+      objectKey: manifest.business.objectKey,
+      parentId: businessFolderMatch.value?.id
+    }), {
       resource: 'businessField',
       key: field.fieldKey,
       method: 'POST',
@@ -720,13 +730,14 @@ function planSchema(manifest, discovery) {
         reason: 'Server readback did not expose a usable custom-object field prefix'
       });
     }
+    const customFolderMatch = findFolder(
+      discovery.customV2.folders,
+      discovery.customV2Namespace.writeObjectKey,
+      manifest.customObject.folder
+    );
     addPlanResult(
       plan,
-      findFolder(
-        discovery.customV2.folders,
-        discovery.customV2Namespace.writeObjectKey,
-        manifest.customObject.folder
-      ),
+      customFolderMatch,
       {
         resource: 'customObjectFieldFolder',
         key: manifest.customObject.folder,
@@ -735,7 +746,11 @@ function planSchema(manifest, discovery) {
       }
     );
     for (const field of manifest.customObject.fields) {
-      addPlanResult(plan, findV2Field(discovery.customV2.fields, field, { bySuffix: true }), {
+      addPlanResult(plan, findV2Field(discovery.customV2.fields, field, {
+        bySuffix: true,
+        objectKey: discovery.customV2Namespace.writeObjectKey,
+        parentId: customFolderMatch.value?.id
+      }), {
         resource: 'customObjectField',
         key: field.suffix,
         method: 'POST',
@@ -874,7 +889,11 @@ async function ensureV2Field(
 ) {
   const bySuffix = Boolean(expected.suffix);
   let current = await readV2Fields(client, manifest, receipt, schemaKey);
-  let result = requireNoCollision(findV2Field(current.fields, expected, { bySuffix }));
+  let result = requireNoCollision(findV2Field(current.fields, expected, {
+    bySuffix,
+    objectKey: writeObjectKey,
+    parentId: folderId
+  }));
   if (result.state === 'exact') return result.value;
   const created = requireCreatedResource(await client.request('POST', '/custom-fields/', {
     mutating: true,
@@ -891,7 +910,11 @@ async function ensureV2Field(
   }), ['field', 'customField', 'data.field', 'data.customField'], 'custom field', receipt);
   recordCompletedCreate(receipt, 'customField', fieldKey, '/custom-fields/');
   current = await readV2Fields(client, manifest, receipt, schemaKey);
-  result = requireNoCollision(findV2Field(current.fields, expected, { bySuffix }));
+  result = requireNoCollision(findV2Field(current.fields, expected, {
+    bySuffix,
+    objectKey: writeObjectKey,
+    parentId: folderId
+  }));
   if (result.state !== 'exact') {
     throw new GuardError('CREATE_READBACK_FAILED', `V2 field ${expected.name} was not confirmed`);
   }
@@ -1276,12 +1299,41 @@ async function readContact(client, receipt, contactId) {
   return requireObject(payload, ['contact', 'data.contact', '$'], 'contact.readback', receipt);
 }
 
+function isNonEmptyValue(value) {
+  if (value === undefined || value === null || value === '') return false;
+  if (Array.isArray(value)) return value.length > 0;
+  if (typeof value === 'object') return Object.keys(value).length > 0;
+  return true;
+}
+
+function sameValue(left, right) {
+  if (left === right) return true;
+  if (
+    (Array.isArray(left) && Array.isArray(right)) ||
+    (left && right && typeof left === 'object' && typeof right === 'object')
+  ) {
+    return JSON.stringify(left) === JSON.stringify(right);
+  }
+  return false;
+}
+
+function customFieldValue(field) {
+  return field?.fieldValue ?? field?.field_value ?? field?.value;
+}
+
 function customFieldValuesMatch(actualFields, expectedFields) {
   if (!Array.isArray(actualFields)) return false;
-  return expectedFields.every((expected) => actualFields.some((actual) =>
-    actual?.id === expected.id &&
-    (actual?.fieldValue ?? actual?.field_value ?? actual?.value) === expected.fieldValue
-  ));
+  const actualNonEmpty = actualFields.filter((field) => isNonEmptyValue(customFieldValue(field)));
+  if (actualNonEmpty.length !== expectedFields.length) return false;
+  const seen = new Set();
+  return expectedFields.every((expected) => {
+    const matches = actualNonEmpty.filter((actual) =>
+      actual?.id === expected.id && sameValue(customFieldValue(actual), expected.fieldValue)
+    );
+    if (matches.length !== 1 || seen.has(expected.id)) return false;
+    seen.add(expected.id);
+    return true;
+  });
 }
 
 function exactTestContactReadback(contact, expected) {
@@ -1321,10 +1373,40 @@ async function ensureTestContact(client, manifest, receipt, name, payload) {
 }
 
 async function readBusinesses(client, manifest, receipt) {
-  const payload = await client.request('GET', '/businesses/', {
-    query: { locationId: manifest.identity.locationId, limit: 100, skip: 0 }
-  });
-  return requireArray(payload, ['businesses', 'data.businesses'], 'businesses', receipt);
+  const limit = 100;
+  const maxPages = 100;
+  const all = [];
+  const seenIds = new Set();
+  const seenPages = new Set();
+  for (let page = 0; page < maxPages; page += 1) {
+    const payload = await client.request('GET', '/businesses/', {
+      query: { locationId: manifest.identity.locationId, limit, skip: page * limit }
+    });
+    const businesses = requireArray(
+      payload,
+      ['businesses', 'data.businesses'],
+      'businesses',
+      receipt
+    );
+    const ids = businesses.map((business) => business?.id);
+    if (ids.some((id) => typeof id !== 'string' || !id)) {
+      throw new GuardError('BUSINESS_PAGINATION_ID_MISSING', 'Business discovery returned a record without an ID');
+    }
+    const signature = JSON.stringify(ids);
+    if (businesses.length && seenPages.has(signature)) {
+      throw new GuardError('BUSINESS_PAGINATION_REPEAT', 'Business discovery repeated a page');
+    }
+    seenPages.add(signature);
+    for (const business of businesses) {
+      if (seenIds.has(business.id)) {
+        throw new GuardError('BUSINESS_PAGINATION_REPEAT', 'Business discovery repeated a record ID');
+      }
+      seenIds.add(business.id);
+      all.push(business);
+    }
+    if (businesses.length < limit) return all;
+  }
+  throw new GuardError('BUSINESS_PAGINATION_LIMIT', 'Business discovery exceeded the bounded page limit');
 }
 
 async function readObjectRecord(client, receipt, schemaKey, recordId) {
@@ -1337,7 +1419,37 @@ async function readObjectRecord(client, receipt, schemaKey, recordId) {
 
 function propertiesMatch(actual, expected) {
   if (!actual || typeof actual !== 'object' || Array.isArray(actual)) return false;
-  return Object.entries(expected).every(([key, value]) => actual[key] === value);
+  const expectedEntries = Object.entries(expected).filter(([, value]) => isNonEmptyValue(value));
+  const actualEntries = Object.entries(actual).filter(([, value]) => isNonEmptyValue(value));
+  if (actualEntries.length !== expectedEntries.length) return false;
+  return expectedEntries.every(([key, value]) => sameValue(actual[key], value));
+}
+
+function normalizedPropertyKey(key) {
+  return String(key).split('.').pop().replace(/[^a-z0-9]/gi, '').toLowerCase();
+}
+
+function safeBusinessReadback(record, expected, manifest) {
+  const properties = record?.properties;
+  if (!properties || typeof properties !== 'object' || Array.isArray(properties)) return false;
+  if (!Object.entries(expected).every(([key, value]) => sameValue(properties[key], value))) return false;
+  const prohibited = new Set(
+    manifest.prohibitedProjectionFields.map((key) => normalizedPropertyKey(key))
+  );
+  const expectedProjectedKeys = new Set(Object.keys(expected));
+  for (const container of [record, properties]) {
+    for (const [key, value] of Object.entries(container)) {
+      if (!isNonEmptyValue(value) || (container === record && key === 'properties')) continue;
+      const normalized = normalizedPropertyKey(key);
+      if (normalized === 'email' || normalized === 'phone' || normalized === 'phonenumber') {
+        return false;
+      }
+      if (prohibited.has(normalized)) return false;
+      const projectedKey = String(key).split('.').pop();
+      if (projectedKey.startsWith('rr_') && !expectedProjectedKeys.has(projectedKey)) return false;
+    }
+  }
+  return true;
 }
 
 async function ensureTestBusiness(client, manifest, receipt, name, payload) {
@@ -1353,7 +1465,7 @@ async function ensureTestBusiness(client, manifest, receipt, name, payload) {
   if (matches.length > 1) throw new GuardError('INCOMPATIBLE_COLLISION', `Multiple TEST businesses named ${name}`);
   if (matches.length === 1) {
     const readback = await readObjectRecord(client, receipt, 'business', matches[0].id);
-    if (!propertiesMatch(readback.properties, payload.properties)) {
+    if (!safeBusinessReadback(readback, payload.properties, manifest)) {
       throw new GuardError('INCOMPATIBLE_COLLISION', `TEST business ${name} is not an exact TEST match`);
     }
     return { ...matches[0], ...readback };
@@ -1367,7 +1479,7 @@ async function ensureTestBusiness(client, manifest, receipt, name, payload) {
   recordCompletedCreate(receipt, 'testBusiness', name, '/objects/business/records');
   const readback = await readObjectRecord(client, receipt, 'business', created.id);
   requireMatchingCreatedId(created, readback, `TEST business ${name}`);
-  if (!propertiesMatch(readback.properties, payload.properties)) {
+  if (!safeBusinessReadback(readback, payload.properties, manifest)) {
     throw new GuardError('CREATE_READBACK_FAILED', `TEST business ${name} failed exact readback`);
   }
   return { id: created.id, name, ...readback };
@@ -1668,6 +1780,11 @@ function createReceipt(manifest, options, nowIso) {
     requests: [],
     responseShapes: [],
     notProven: [],
+    testVerification: {
+      suffix: options.testSuffix || null,
+      recordsRead: false,
+      recordsWritten: false
+    },
     safety: {
       updatesAttempted: 0,
       deletesAttempted: 0,
@@ -1772,12 +1889,16 @@ async function runSchemaTool({
     ) {
       throw new GuardError('FINAL_SCHEMA_NOT_EXACT', 'Post-create readback did not match the exact manifest');
     }
+    receipt.testVerification.recordsRead = true;
     await applyTestRecords(
       locationClient,
       manifest,
       receipt,
       options.testSuffix,
       timestampFromTestSuffix(options.testSuffix)
+    );
+    receipt.testVerification.recordsWritten = receipt.completed.some((entry) =>
+      entry.resource.startsWith('test')
     );
     receipt.verdict = 'APPLIED';
     receipt.notProven = [];
@@ -1830,6 +1951,7 @@ module.exports = {
   loadManifest,
   parseArgs,
   planSchema,
+  readBusinesses,
   resolveCredential,
   runSchemaTool,
   testIds,
