@@ -2,6 +2,8 @@
 
 Timestamp: 2026-08-09T14:05:37Z
 
+Authority refreshed: 2026-08-09T14:23:50Z
+
 Owner: Codex
 
 Repository: `chrishowardtx/GoHighLevel-MCP`
@@ -134,15 +136,20 @@ Integrated main at verification start: `6176588dd1e085c23102730ed75188cd91ce6bd5
 
 ## Supabase collision boundary
 
-- RestoreRadar pull request 139 remains open and owned by the separate Supabase lane at head
-  `c57a12dccf9db1ed8095c958e7e8ab1d560a231b`. Its three GitHub checks are successful, but fresh
-  GitHub authority reports `mergeable=false` / `mergeable_state=dirty`; the earlier mergeable handoff
-  has drifted and the Supabase lane must resolve the conflict.
-- This phase changed none of its 30 files, contracts, tables, functions, secrets, Vercel settings,
-  live Supabase state, routing destinations, or Redis authority.
-- The coordination partner acknowledged the non-colliding ownership split and reported no planned
-  review changes at coordination time. This lane sent the later merge-conflict finding back to that
-  partner without editing its branch.
+- RestoreRadar pull request 139 remains open, mergeable, and owned by the separate Supabase lane at
+  final head `64b572198b6bbf019364029b898efe08b7a121f6`. The branch incorporated current main through the
+  normal merge commit `3ed7055422740c62b9d8831a6d8964885ab26daa`; all three final-head GitHub
+  checks are successful.
+- The resolved conflict touched only `LATEST-HANDOFF.md`. The PR now contains 31 files; the only
+  addition to the previously coordinated 30-file boundary is the Supabase lane's conflict-resolution
+  handoff. No application, schema, environment, routing, secret, or HighLevel file changed during the
+  conflict resolution.
+- This HighLevel phase changed none of the Supabase lane's files, contracts, tables, functions,
+  secrets, Vercel settings, live Supabase/Redis state, routing destinations, or Redis authority.
+- Fresh Supabase-lane evidence reports 839/839 full Node 24 tests, 77/77 focused integration tests,
+  production build/gates, npm audit, Gitleaks, and independent P0-P2 review all passing. The
+  Redis-authoritative post-persistence/event contract is unchanged, so no HighLevel design rebase is
+  required after PR integration.
 
 ## Official API authority
 
@@ -173,7 +180,6 @@ Integrated main at verification start: `6176588dd1e085c23102730ed75188cd91ce6bd5
 ## Exact next action
 
 Repair Hattie's inherited lockfile drift and complete its clean install/full build before deploying
-either cross-account runtime change. In the Supabase lane, resolve RestoreRadar pull request 139's
-current merge conflict, rerun its checks, and integrate it; only after that event boundary is
-authoritative should a disabled-by-default HighLevel projection consumer be designed against the
-post-persistence outbox. Keep homeowner communications disabled.
+either cross-account runtime change. Review and integrate the now-clean RestoreRadar pull request 139;
+only after that event boundary is authoritative should a disabled-by-default HighLevel projection
+consumer be designed against the post-persistence outbox. Keep homeowner communications disabled.
