@@ -69,6 +69,11 @@ Protocol-relative paths, alternate origins, cross-company/location payloads,
 and role-crossing endpoints are rejected before network dispatch. A successful
 object schema create must be HTTP 201 with the exact server object ID, location,
 key, labels, description, and primary property before any later POST can run.
+Every create response must expose a server-assigned ID. The tool matches that
+ID against a direct record read where the API supports one, otherwise against
+the exact collection readback. Object-schema visibility gets a bounded direct
+read retry; if it remains unavailable, the run halts without repeating the
+object POST or proceeding to bulk creates.
 
 The v3 create-record page currently exposes an open request-body schema. The
 tool uses the documented `properties` record shape, creates only TEST-marked

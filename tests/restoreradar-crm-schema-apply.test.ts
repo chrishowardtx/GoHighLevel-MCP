@@ -368,6 +368,221 @@ function completeRouter(call: FetchCall) {
   throw new Error(`Unexpected request in complete fixture: ${call.method} ${pathname}`);
 }
 
+function statefulMissingSchemaServer(objectReadDelay = 0) {
+  const manifest = loadManifest();
+  let sequence = 0;
+  const nextId = (prefix: string) => `${prefix}_${++sequence}`;
+  const state: any = {
+    pipelines: [],
+    legacyFields: [],
+    businessFolders: [],
+    businessFields: [],
+    customFolders: [],
+    customFields: [],
+    object: null,
+    objectReadDelay,
+    associations: [],
+    contacts: [],
+    businesses: [],
+    opportunities: [],
+    assignments: [],
+    relations: []
+  };
+
+  const router = (call: FetchCall) => {
+    const pathname = call.url.pathname;
+    if (call.method === 'GET' && pathname === `/companies/${manifest.identity.companyId}`) {
+      return jsonResponse({ company: { id: manifest.identity.companyId } });
+    }
+    if (call.method === 'GET' && pathname === `/locations/${manifest.identity.locationId}`) {
+      return jsonResponse({
+        location: { id: manifest.identity.locationId, companyId: manifest.identity.companyId }
+      });
+    }
+    if (call.method === 'GET' && pathname === '/opportunities/pipelines') {
+      return jsonResponse({ pipelines: state.pipelines });
+    }
+    if (call.method === 'POST' && pathname === '/opportunities/pipelines') {
+      const pipeline = {
+        ...call.body,
+        id: nextId('pipeline'),
+        stages: call.body.stages.map((stage: any) => ({ ...stage, id: nextId('stage') }))
+      };
+      state.pipelines.push(pipeline);
+      return jsonResponse({ pipeline }, 201);
+    }
+    if (call.method === 'GET' && pathname.endsWith('/customFields')) {
+      const model = call.url.searchParams.get('model');
+      return jsonResponse({
+        customFields: model && model !== 'all'
+          ? state.legacyFields.filter((field: any) => field.model === model)
+          : state.legacyFields
+      });
+    }
+    if (call.method === 'POST' && pathname.endsWith('/customFields')) {
+      const customField = { ...call.body, id: nextId(`${call.body.model}_field`) };
+      state.legacyFields.push(customField);
+      return jsonResponse({ customField }, 201);
+    }
+    if (call.method === 'GET' && pathname === '/objects/') {
+      return jsonResponse({
+        objects: [
+          { key: 'contact', standard: true },
+          { key: 'opportunity', standard: true },
+          { key: 'business', standard: true },
+          ...(state.object ? [state.object] : [])
+        ]
+      });
+    }
+    if (call.method === 'POST' && pathname === '/objects/') {
+      state.object = {
+        ...call.body,
+        id: nextId('object'),
+        standard: false,
+        primaryDisplayProperty: call.body.primaryDisplayPropertyDetails.key
+      };
+      state.customFields.push({
+        id: nextId('assignment_primary'),
+        name: call.body.primaryDisplayPropertyDetails.name,
+        fieldKey: 'custom_object.rr_lead_assignment.rr_assignment_id',
+        objectKey: 'custom_object.rr_lead_assignment',
+        dataType: 'TEXT',
+        options: []
+      });
+      return jsonResponse({ object: state.object }, 201);
+    }
+    if (call.method === 'GET' && pathname === `/objects/${manifest.customObject.key}`) {
+      if (!state.object || state.objectReadDelay > 0) {
+        if (state.objectReadDelay > 0) state.objectReadDelay -= 1;
+        return jsonResponse({ message: 'not visible' }, 404);
+      }
+      return jsonResponse({ object: state.object, fields: state.customFields });
+    }
+    if (call.method === 'GET' && pathname === '/custom-fields/object-key/business') {
+      return jsonResponse({ fields: state.businessFields, folders: state.businessFolders });
+    }
+    if (
+      call.method === 'GET' &&
+      pathname === `/custom-fields/object-key/${manifest.customObject.key}`
+    ) {
+      return jsonResponse({ fields: state.customFields, folders: state.customFolders });
+    }
+    if (call.method === 'POST' && pathname === '/custom-fields/folder') {
+      const folder = { ...call.body, id: nextId('folder') };
+      const target = call.body.objectKey === 'business'
+        ? state.businessFolders
+        : state.customFolders;
+      target.push(folder);
+      return jsonResponse({ folder }, 201);
+    }
+    if (call.method === 'POST' && pathname === '/custom-fields/') {
+      const field = { ...call.body, id: nextId('v2_field'), options: call.body.options || [] };
+      const target = call.body.objectKey === 'business'
+        ? state.businessFields
+        : state.customFields;
+      target.push(field);
+      return jsonResponse({ field }, 201);
+    }
+    if (call.method === 'GET' && pathname === '/associations/') {
+      return jsonResponse({ associations: state.associations });
+    }
+    if (call.method === 'POST' && pathname === '/associations/') {
+      const association = { ...call.body, id: nextId('association') };
+      state.associations.push(association);
+      return jsonResponse({ association }, 201);
+    }
+    if (call.method === 'POST' && pathname === '/contacts/search') {
+      return jsonResponse({
+        contacts: state.contacts.filter((contact: any) => contact.name === call.body.query)
+      });
+    }
+    if (call.method === 'POST' && pathname === '/contacts/') {
+      const contact = { ...call.body, id: nextId('contact') };
+      state.contacts.push(contact);
+      return jsonResponse({ contact }, 201);
+    }
+    if (call.method === 'GET' && pathname.startsWith('/contacts/')) {
+      const id = pathname.split('/').pop();
+      const contact = state.contacts.find((entry: any) => entry.id === id);
+      return contact ? jsonResponse({ contact }) : jsonResponse({}, 404);
+    }
+    if (call.method === 'GET' && pathname === '/businesses/') {
+      return jsonResponse({
+        businesses: state.businesses.map((business: any) => ({
+          id: business.id,
+          name: business.properties.name
+        }))
+      });
+    }
+    if (call.method === 'POST' && pathname === '/objects/business/records') {
+      const record = { ...call.body, id: nextId('business') };
+      state.businesses.push(record);
+      return jsonResponse({ record }, 201);
+    }
+    if (call.method === 'GET' && pathname.startsWith('/objects/business/records/')) {
+      const id = pathname.split('/').pop();
+      const record = state.businesses.find((entry: any) => entry.id === id);
+      return record ? jsonResponse({ record }) : jsonResponse({}, 404);
+    }
+    if (call.method === 'GET' && pathname === '/opportunities/search') {
+      const name = call.url.searchParams.get('q');
+      const pipelineId = call.url.searchParams.get('pipelineId');
+      return jsonResponse({
+        opportunities: state.opportunities.filter((opportunity: any) =>
+          opportunity.name === name && opportunity.pipelineId === pipelineId
+        )
+      });
+    }
+    if (call.method === 'POST' && pathname === '/opportunities/') {
+      const opportunity = { ...call.body, id: nextId('opportunity') };
+      state.opportunities.push(opportunity);
+      return jsonResponse({ opportunity }, 201);
+    }
+    if (call.method === 'GET' && /^\/opportunities\/[^/]+$/.test(pathname)) {
+      const id = pathname.split('/').pop();
+      const opportunity = state.opportunities.find((entry: any) => entry.id === id);
+      return opportunity ? jsonResponse({ opportunity }) : jsonResponse({}, 404);
+    }
+    if (
+      call.method === 'POST' &&
+      pathname === `/objects/${manifest.customObject.key}/records/search`
+    ) {
+      return jsonResponse({ records: state.assignments });
+    }
+    if (
+      call.method === 'POST' &&
+      pathname === `/objects/${manifest.customObject.key}/records`
+    ) {
+      const record = { ...call.body, id: nextId('assignment') };
+      state.assignments.push(record);
+      return jsonResponse({ record }, 201);
+    }
+    if (
+      call.method === 'GET' &&
+      pathname.startsWith(`/objects/${manifest.customObject.key}/records/`)
+    ) {
+      const id = pathname.split('/').pop();
+      const record = state.assignments.find((entry: any) => entry.id === id);
+      return record ? jsonResponse({ record }) : jsonResponse({}, 404);
+    }
+    if (call.method === 'GET' && pathname.startsWith('/associations/relations/')) {
+      const homeownerId = pathname.split('/').pop();
+      return jsonResponse({
+        relations: state.relations.filter((relation: any) =>
+          relation.firstRecordId === homeownerId
+        )
+      });
+    }
+    if (call.method === 'POST' && pathname === '/associations/relations') {
+      const relation = { ...call.body, id: nextId('relation') };
+      state.relations.push(relation);
+      return jsonResponse({ relation }, 201);
+    }
+    throw new Error(`Unexpected request in stateful fixture: ${call.method} ${pathname}`);
+  };
+  return { manifest, router, state };
+}
+
 describe('RestoreRadar guarded CRM schema apply tool', () => {
   test('dry-run performs discovery reads and no writes', async () => {
     const { calls, fetchImpl } = mockFetch((call) => emptyDiscoveryRouter(call));
@@ -719,6 +934,55 @@ describe('RestoreRadar guarded CRM schema apply tool', () => {
     expect(posts[0].url.pathname).toBe('/objects/');
     expect(posts[0].headers.Authorization).toBe(`Bearer ${AGENCY_TOKEN}`);
     expect(result.receipt.haltReason.code).toBe('MALFORMED_OBJECT_CREATE_RESPONSE');
+  });
+
+  test('creates a complete missing schema and TEST graph, then replays with zero writes', async () => {
+    const server = statefulMissingSchemaServer(2);
+    const first = mockFetch(server.router);
+    const firstResult = await runSchemaTool({
+      argv: requiredArgs(['--apply', '--test-suffix', TEST_SUFFIX]),
+      fetchImpl: first.fetchImpl,
+      env: credentialEnv(),
+      now: () => NOW
+    });
+    expect(firstResult.receipt.verdict).toBe('APPLIED');
+    expect(firstResult.exitCode).toBe(0);
+    const firstMutationPosts = first.calls.filter((call) =>
+      call.method === 'POST' &&
+      call.url.pathname !== '/contacts/search' &&
+      !call.url.pathname.endsWith('/records/search')
+    );
+    expect(firstMutationPosts.length).toBeGreaterThan(0);
+    expect(firstMutationPosts[0].url.pathname).toBe('/objects/');
+    expect(server.state.pipelines).toHaveLength(2);
+    expect(server.state.legacyFields).toHaveLength(
+      server.manifest.legacyFields.contact.length +
+      server.manifest.legacyFields.opportunity.length
+    );
+    expect(server.state.businessFields).toHaveLength(server.manifest.business.fields.length);
+    expect(server.state.customFields).toHaveLength(server.manifest.customObject.fields.length + 1);
+    expect(server.state.associations).toHaveLength(1);
+    expect(server.state.contacts).toHaveLength(2);
+    expect(server.state.businesses).toHaveLength(1);
+    expect(server.state.opportunities).toHaveLength(2);
+    expect(server.state.assignments).toHaveLength(1);
+    expect(server.state.relations).toHaveLength(1);
+
+    const second = mockFetch(server.router);
+    const secondResult = await runSchemaTool({
+      argv: requiredArgs(['--apply', '--test-suffix', TEST_SUFFIX]),
+      fetchImpl: second.fetchImpl,
+      env: credentialEnv(),
+      now: () => new Date('2035-06-07T08:09:10.000Z')
+    });
+    expect(secondResult.receipt.verdict).toBe('APPLIED');
+    expect(secondResult.receipt.completed).toEqual([]);
+    const secondMutationPosts = second.calls.filter((call) =>
+      call.method === 'POST' &&
+      call.url.pathname !== '/contacts/search' &&
+      !call.url.pathname.endsWith('/records/search')
+    );
+    expect(secondMutationPosts).toEqual([]);
   });
 
   test('separates plural schema reads from one server-resolved singular V2 write namespace', () => {

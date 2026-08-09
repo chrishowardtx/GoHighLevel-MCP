@@ -777,6 +777,26 @@ function recordCompletedCreate(receipt, resource, key, endpoint) {
   receipt.completed.push({ resource, key, method: 'POST', path: endpoint, status: 'created' });
 }
 
+function requireCreatedResource(payload, paths, resource, receipt) {
+  const created = requireObject(payload, paths, `${resource}.create`, receipt);
+  if (!created.id || typeof created.id !== 'string') {
+    throw new GuardError(
+      'CREATE_RESPONSE_ID_MISSING',
+      `${resource} create response did not include a server-assigned ID`
+    );
+  }
+  return created;
+}
+
+function requireMatchingCreatedId(created, readback, resource) {
+  if (!readback?.id || readback.id !== created.id) {
+    throw new GuardError(
+      'CREATE_RESPONSE_ID_MISMATCH',
+      `${resource} readback did not match the server-assigned create ID`
+    );
+  }
+}
+
 function pipelinePayload(manifest, pipeline) {
   return {
     name: pipeline.name,
@@ -792,15 +812,16 @@ function pipelinePayload(manifest, pipeline) {
 async function ensurePipeline(client, manifest, receipt, expected) {
   let result = requireNoCollision(findPipeline(await readPipelines(client, manifest, receipt), expected));
   if (result.state === 'exact') return result.value;
-  await client.request('POST', '/opportunities/pipelines', {
+  const created = requireCreatedResource(await client.request('POST', '/opportunities/pipelines', {
     mutating: true,
     body: pipelinePayload(manifest, expected)
-  });
+  }), ['pipeline', 'data.pipeline'], 'pipeline', receipt);
   recordCompletedCreate(receipt, 'pipeline', expected.name, '/opportunities/pipelines');
   result = requireNoCollision(findPipeline(await readPipelines(client, manifest, receipt), expected));
   if (result.state !== 'exact') {
     throw new GuardError('CREATE_READBACK_FAILED', `Pipeline ${expected.name} was not confirmed after create`);
   }
+  requireMatchingCreatedId(created, result.value, `Pipeline ${expected.name}`);
   return result.value;
 }
 
@@ -809,16 +830,17 @@ async function ensureLegacyField(client, manifest, receipt, model, name) {
   let result = requireNoCollision(findLegacyField(fields, model, name));
   if (result.state === 'exact') return result.value;
   const endpoint = `/locations/${encodeURIComponent(manifest.identity.locationId)}/customFields`;
-  await client.request('POST', endpoint, {
+  const created = requireCreatedResource(await client.request('POST', endpoint, {
     mutating: true,
     body: { name, dataType: 'TEXT', model }
-  });
+  }), ['customField', 'data.customField'], `${model} field`, receipt);
   recordCompletedCreate(receipt, `${model}Field`, name, endpoint);
   fields = await readLegacyFields(client, manifest, receipt, model);
   result = requireNoCollision(findLegacyField(fields, model, name));
   if (result.state !== 'exact') {
     throw new GuardError('CREATE_READBACK_FAILED', `${model} field ${name} was not confirmed after create`);
   }
+  requireMatchingCreatedId(created, result.value, `${model} field ${name}`);
   return result.value;
 }
 
@@ -826,16 +848,17 @@ async function ensureFolder(client, manifest, receipt, schemaKey, writeObjectKey
   let current = await readV2Fields(client, manifest, receipt, schemaKey);
   let result = requireNoCollision(findFolder(current.folders, writeObjectKey, name));
   if (result.state === 'exact') return result.value;
-  await client.request('POST', '/custom-fields/folder', {
+  const created = requireCreatedResource(await client.request('POST', '/custom-fields/folder', {
     mutating: true,
     body: { objectKey: writeObjectKey, name, locationId: manifest.identity.locationId }
-  });
+  }), ['folder', 'data.folder'], 'custom field folder', receipt);
   recordCompletedCreate(receipt, 'customFieldFolder', `${writeObjectKey}:${name}`, '/custom-fields/folder');
   current = await readV2Fields(client, manifest, receipt, schemaKey);
   result = requireNoCollision(findFolder(current.folders, writeObjectKey, name));
   if (result.state !== 'exact') {
     throw new GuardError('CREATE_READBACK_FAILED', `Folder ${name} for ${writeObjectKey} was not confirmed`);
   }
+  requireMatchingCreatedId(created, result.value, `Folder ${name}`);
   return result.value;
 }
 
@@ -853,7 +876,7 @@ async function ensureV2Field(
   let current = await readV2Fields(client, manifest, receipt, schemaKey);
   let result = requireNoCollision(findV2Field(current.fields, expected, { bySuffix }));
   if (result.state === 'exact') return result.value;
-  await client.request('POST', '/custom-fields/', {
+  const created = requireCreatedResource(await client.request('POST', '/custom-fields/', {
     mutating: true,
     body: {
       locationId: manifest.identity.locationId,
@@ -865,13 +888,14 @@ async function ensureV2Field(
       objectKey: writeObjectKey,
       parentId: folderId
     }
-  });
+  }), ['field', 'customField', 'data.field', 'data.customField'], 'custom field', receipt);
   recordCompletedCreate(receipt, 'customField', fieldKey, '/custom-fields/');
   current = await readV2Fields(client, manifest, receipt, schemaKey);
   result = requireNoCollision(findV2Field(current.fields, expected, { bySuffix }));
   if (result.state !== 'exact') {
     throw new GuardError('CREATE_READBACK_FAILED', `V2 field ${expected.name} was not confirmed`);
   }
+  requireMatchingCreatedId(created, result.value, `V2 field ${expected.name}`);
   return result.value;
 }
 
@@ -901,7 +925,12 @@ async function ensureCustomObject(agencyClient, locationClient, manifest, receip
       primaryDisplayPropertyDetails: manifest.customObject.primaryDisplayPropertyDetails
     }
   });
-  const created = requireObject(response, ['object', 'data.object'], 'object.create', receipt);
+  const created = requireCreatedResource(
+    response,
+    ['object', 'data.object'],
+    'custom object',
+    receipt
+  );
   if (!exactCreatedCustomObject(created, manifest)) {
     throw new GuardError(
       'MALFORMED_OBJECT_CREATE_RESPONSE',
@@ -909,12 +938,31 @@ async function ensureCustomObject(agencyClient, locationClient, manifest, receip
     );
   }
   recordCompletedCreate(receipt, 'customObject', manifest.customObject.key, '/objects/');
-  objects = await readObjects(locationClient, manifest, receipt);
-  result = requireNoCollision(findObject(objects, manifest.customObject));
-  if (result.state !== 'exact' || result.value?.id !== created.id) {
-    throw new GuardError('CREATE_READBACK_FAILED', 'Custom object was not confirmed after create');
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const details = await readObjectDetails(
+        locationClient,
+        manifest,
+        receipt,
+        manifest.customObject.key
+      );
+      const direct = requireNoCollision(findObject([details.object], manifest.customObject));
+      if (direct.state !== 'exact' || !exactCreatedCustomObject(details.object, manifest)) {
+        throw new GuardError(
+          'CREATE_READBACK_FAILED',
+          'Custom object direct readback was not an exact RestoreRadar match'
+        );
+      }
+      requireMatchingCreatedId(created, details.object, 'Custom object');
+      return details.object;
+    } catch (error) {
+      if (!(error instanceof ApiError) || error.status !== 404) throw error;
+    }
   }
-  return result.value;
+  throw new GuardError(
+    'CREATE_ACCEPTED_READBACK_PENDING',
+    'Custom object create returned an ID but direct readback was not visible after bounded retries'
+  );
 }
 
 async function resolveCustomObjectV2Namespace(client, manifest, receipt, schemaKey) {
@@ -933,16 +981,17 @@ async function ensureAssociation(client, manifest, receipt) {
   let associations = await readAssociations(client, manifest, receipt);
   let result = requireNoCollision(findAssociation(associations, manifest.association));
   if (result.state === 'exact') return result.value;
-  await client.request('POST', '/associations/', {
+  const created = requireCreatedResource(await client.request('POST', '/associations/', {
     mutating: true,
     body: { locationId: manifest.identity.locationId, ...manifest.association }
-  });
+  }), ['association', 'data.association'], 'association', receipt);
   recordCompletedCreate(receipt, 'association', manifest.association.key, '/associations/');
   associations = await readAssociations(client, manifest, receipt);
   result = requireNoCollision(findAssociation(associations, manifest.association));
   if (result.state !== 'exact') {
     throw new GuardError('CREATE_READBACK_FAILED', 'Association was not confirmed after create');
   }
+  requireMatchingCreatedId(created, result.value, 'Association');
   return result.value;
 }
 
@@ -1256,11 +1305,15 @@ async function ensureTestContact(client, manifest, receipt, name, payload) {
     }
     return readback;
   }
-  await client.request('POST', '/contacts/', { mutating: true, body: payload });
+  const created = requireCreatedResource(
+    await client.request('POST', '/contacts/', { mutating: true, body: payload }),
+    ['contact', 'data.contact'],
+    'TEST contact',
+    receipt
+  );
   recordCompletedCreate(receipt, 'testContact', name, '/contacts/');
-  contact = await searchContact(client, manifest, receipt, name);
-  if (!contact?.id) throw new GuardError('CREATE_READBACK_FAILED', `TEST contact ${name} was not confirmed`);
-  const readback = await readContact(client, receipt, contact.id);
+  const readback = await readContact(client, receipt, created.id);
+  requireMatchingCreatedId(created, readback, `TEST contact ${name}`);
   if (!exactTestContactReadback(readback, payload)) {
     throw new GuardError('CREATE_READBACK_FAILED', `TEST contact ${name} failed safe readback validation`);
   }
@@ -1305,18 +1358,19 @@ async function ensureTestBusiness(client, manifest, receipt, name, payload) {
     }
     return { ...matches[0], ...readback };
   }
-  await client.request('POST', '/objects/business/records', { mutating: true, body: payload });
+  const created = requireCreatedResource(
+    await client.request('POST', '/objects/business/records', { mutating: true, body: payload }),
+    ['record', 'data.record'],
+    'TEST business',
+    receipt
+  );
   recordCompletedCreate(receipt, 'testBusiness', name, '/objects/business/records');
-  businesses = await readBusinesses(client, manifest, receipt);
-  matches = businesses.filter((business) => business?.name === name);
-  if (matches.length !== 1 || !matches[0]?.id) {
-    throw new GuardError('CREATE_READBACK_FAILED', `TEST business ${name} was not confirmed`);
-  }
-  const readback = await readObjectRecord(client, receipt, 'business', matches[0].id);
+  const readback = await readObjectRecord(client, receipt, 'business', created.id);
+  requireMatchingCreatedId(created, readback, `TEST business ${name}`);
   if (!propertiesMatch(readback.properties, payload.properties)) {
     throw new GuardError('CREATE_READBACK_FAILED', `TEST business ${name} failed exact readback`);
   }
-  return { ...matches[0], ...readback };
+  return { id: created.id, name, ...readback };
 }
 
 async function searchOpportunity(client, manifest, receipt, name, pipelineId) {
@@ -1367,13 +1421,15 @@ async function ensureTestOpportunity(client, manifest, receipt, name, payload) {
     }
     return readback;
   }
-  await client.request('POST', '/opportunities/', { mutating: true, body: payload });
+  const created = requireCreatedResource(
+    await client.request('POST', '/opportunities/', { mutating: true, body: payload }),
+    ['opportunity', 'data.opportunity'],
+    'TEST opportunity',
+    receipt
+  );
   recordCompletedCreate(receipt, 'testOpportunity', name, '/opportunities/');
-  opportunity = await searchOpportunity(client, manifest, receipt, name, payload.pipelineId);
-  if (!opportunity?.id) {
-    throw new GuardError('CREATE_READBACK_FAILED', `TEST opportunity ${name} was not confirmed`);
-  }
-  const readback = await readOpportunity(client, receipt, opportunity.id);
+  const readback = await readOpportunity(client, receipt, created.id);
+  requireMatchingCreatedId(created, readback, `TEST opportunity ${name}`);
   if (!exactTestOpportunityReadback(readback, payload)) {
     throw new GuardError('CREATE_READBACK_FAILED', `TEST opportunity ${name} failed exact readback`);
   }
@@ -1423,20 +1479,26 @@ async function ensureTestAssignment(client, manifest, receipt, externalId, paylo
   }
   if (matches.length > 1) throw new GuardError('INCOMPATIBLE_COLLISION', 'Duplicate TEST assignments exist');
   if (matches.length === 1) return matches[0];
-  await client.request('POST', `/objects/${encodeURIComponent(manifest.customObject.key)}/records`, {
+  const created = requireCreatedResource(await client.request(
+    'POST',
+    `/objects/${encodeURIComponent(manifest.customObject.key)}/records`,
+    {
     mutating: true,
     body: payload
-  });
+    }
+  ), ['record', 'data.record'], 'TEST assignment', receipt);
   recordCompletedCreate(receipt, 'testAssignment', externalId, `/objects/${manifest.customObject.key}/records`);
-  records = await searchObjectRecord(client, manifest, receipt, manifest.customObject.key, query);
-  matches = records.filter((record) =>
-    record?.properties?.rr_assignment_id === externalId &&
-    propertiesMatch(record.properties, payload.properties)
+  const readback = await readObjectRecord(
+    client,
+    receipt,
+    manifest.customObject.key,
+    created.id
   );
-  if (matches.length !== 1 || !matches[0]?.id) {
-    throw new GuardError('CREATE_READBACK_FAILED', 'TEST assignment was not confirmed');
+  requireMatchingCreatedId(created, readback, 'TEST assignment');
+  if (!propertiesMatch(readback.properties, payload.properties)) {
+    throw new GuardError('CREATE_READBACK_FAILED', 'TEST assignment failed exact readback');
   }
-  return matches[0];
+  return readback;
 }
 
 async function readRelations(client, manifest, receipt, recordId, associationId) {
@@ -1466,7 +1528,12 @@ async function ensureTestRelation(client, manifest, receipt, association, homeow
     firstRecordId: homeownerId,
     secondRecordId: assignmentId
   };
-  await client.request('POST', '/associations/relations', { mutating: true, body });
+  const created = requireCreatedResource(
+    await client.request('POST', '/associations/relations', { mutating: true, body }),
+    ['relation', 'data.relation'],
+    'TEST relation',
+    receipt
+  );
   recordCompletedCreate(receipt, 'testRelation', `${homeownerId}:${assignmentId}`, '/associations/relations');
   relations = await readRelations(client, manifest, receipt, homeownerId, association.id);
   matches = relations.filter((relation) =>
@@ -1475,6 +1542,7 @@ async function ensureTestRelation(client, manifest, receipt, association, homeow
     relation?.secondRecordId === assignmentId
   );
   if (matches.length !== 1) throw new GuardError('CREATE_READBACK_FAILED', 'TEST relation was not confirmed');
+  requireMatchingCreatedId(created, matches[0], 'TEST relation');
   return matches[0];
 }
 
