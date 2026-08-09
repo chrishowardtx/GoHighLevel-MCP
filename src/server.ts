@@ -34,6 +34,13 @@ import { GHLConfig } from './types/ghl-types';
 import { ProductsTools } from './tools/products-tools.js';
 import { PaymentsTools } from './tools/payments-tools.js';
 import { InvoicesTools } from './tools/invoices-tools.js';
+import {
+  assertLocationToolExecutionAllowed,
+  createLocationProfileConfig,
+  filterLocationToolDefinitions,
+  verifyLocationIdentity,
+  type LocationProfileConfig,
+} from './location-mode.js';
 
 // Load environment variables
 dotenv.config();
@@ -63,6 +70,7 @@ class GHLMCPServer {
   private productsTools: ProductsTools;
   private paymentsTools: PaymentsTools;
   private invoicesTools: InvoicesTools;
+  private locationProfile!: LocationProfileConfig;
 
   constructor() {
     // Initialize MCP server with capabilities
@@ -110,22 +118,8 @@ class GHLMCPServer {
    * Initialize GoHighLevel API client with configuration
    */
   private initializeGHLClient(): GHLApiClient {
-    // Load configuration from environment
-    const config: GHLConfig = {
-      accessToken: process.env.GHL_API_KEY || '',
-      baseUrl: process.env.GHL_BASE_URL || 'https://services.leadconnectorhq.com',
-      version: '2021-07-28',
-      locationId: process.env.GHL_LOCATION_ID || ''
-    };
-
-    // Validate required configuration
-    if (!config.accessToken) {
-      throw new Error('GHL_API_KEY environment variable is required');
-    }
-
-    if (!config.locationId) {
-      throw new Error('GHL_LOCATION_ID environment variable is required');
-    }
+    this.locationProfile = createLocationProfileConfig();
+    const config: GHLConfig = this.locationProfile.apiConfig;
 
     process.stderr.write('[GHL MCP] Initializing GHL API client...\n');
     process.stderr.write(`[GHL MCP] Base URL: ${config.baseUrl}\n`);
@@ -185,8 +179,16 @@ class GHLMCPServer {
           ...paymentsToolDefinitions,
           ...invoicesToolDefinitions
         ];
-        
-        process.stderr.write(`[GHL MCP] Registered ${allTools.length} tools total:\n`);
+
+        const availableTools = filterLocationToolDefinitions(
+          allTools,
+          this.locationProfile.mutationsEnabled,
+        );
+
+        process.stderr.write(`[GHL MCP] Registered ${allTools.length} tool implementations.\n`);
+        process.stderr.write(
+          `[GHL MCP] Exposed ${availableTools.length} tools in ${this.locationProfile.mutationsEnabled ? 'mutation-enabled' : 'audit/read-only'} mode:\n`,
+        );
         process.stderr.write(`[GHL MCP] - ${contactToolDefinitions.length} contact tools\n`);
         process.stderr.write(`[GHL MCP] - ${conversationToolDefinitions.length} conversation tools\n`);
         process.stderr.write(`[GHL MCP] - ${blogToolDefinitions.length} blog tools\n`);
@@ -208,7 +210,7 @@ class GHLMCPServer {
         process.stderr.write(`[GHL MCP] - ${invoicesToolDefinitions.length} invoices tools\n`);
         
         return {
-          tools: allTools
+          tools: availableTools
         };
       } catch (error) {
         console.error('[GHL MCP] Error listing tools:', error);
@@ -227,6 +229,8 @@ class GHLMCPServer {
       process.stderr.write(`[GHL MCP] Arguments: ${JSON.stringify(args, null, 2)}\n`);
 
       try {
+        assertLocationToolExecutionAllowed(name, args || {}, this.locationProfile);
+
         let result: any;
 
         // Route to appropriate tool handler
@@ -605,12 +609,15 @@ class GHLMCPServer {
    */
   private async testGHLConnection(): Promise<void> {
     try {
-      process.stderr.write('[GHL MCP] Testing GHL API connection...\n');
-      
-      const result = await this.ghlClient.testConnection();
-      
-      process.stderr.write('[GHL MCP] ✅ GHL API connection successful\n');
-      process.stderr.write(`[GHL MCP] Connected to location: ${result.data?.locationId}\n`);
+      process.stderr.write('[GHL MCP] Verifying expected location and company identity...\n');
+
+      await verifyLocationIdentity(
+        this.ghlClient,
+        this.locationProfile.expectedLocationId,
+        this.locationProfile.expectedCompanyId,
+      );
+
+      process.stderr.write('[GHL MCP] ✅ Expected location and company identity confirmed\n');
     } catch (error) {
       console.error('[GHL MCP] ❌ GHL API connection failed:', error);
       throw new Error(`Failed to connect to GHL API: ${error}`);
@@ -660,7 +667,10 @@ class GHLMCPServer {
       const invoicesToolCount = this.invoicesTools.getTools().length;
       const totalTools = contactToolCount + conversationToolCount + blogToolCount + opportunityToolCount + calendarToolCount + emailToolCount + locationToolCount + emailISVToolCount + socialMediaToolCount + mediaToolCount + objectToolCount + associationToolCount + customFieldV2ToolCount + workflowToolCount + surveyToolCount + storeToolCount + productsToolCount + paymentsToolCount + invoicesToolCount;
       
-      process.stderr.write(`📋 Available tools: ${totalTools}\n`);
+      process.stderr.write(`📋 Registered tool implementations: ${totalTools}\n`);
+      process.stderr.write(
+        `🔒 Exposure mode: ${this.locationProfile.mutationsEnabled ? 'mutation-enabled (explicit opt-in)' : 'audit/read-only (default)'}\n`,
+      );
       process.stderr.write('\n');
       process.stderr.write('🎯 CONTACT MANAGEMENT (31 tools):\n');
       process.stderr.write('   BASIC: create, search, get, update, delete contacts\n');
@@ -830,4 +840,4 @@ async function main(): Promise<void> {
 main().catch((error) => {
   console.error('Unhandled error:', error);
   process.exit(1);
-}); 
+});

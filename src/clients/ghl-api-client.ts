@@ -105,6 +105,9 @@ import {
   GHLCustomValueRequest,
   GHLCustomValueDeleteResponse,
   GHLLocationTemplatesResponse,
+  GHLCompanyResponse,
+  GHLUsersSearchResponse,
+  GHLSnapshotsResponse,
   // Email ISV types
   GHLEmailVerificationRequest,
   GHLEmailVerificationResponse,
@@ -2275,6 +2278,63 @@ export class GHLApiClient {
   }
 
   /**
+   * Get agency/company identity
+   * GET /companies/{companyId} (current v3 contract)
+   */
+  async getCompany(companyId: string): Promise<GHLApiResponse<GHLCompanyResponse>> {
+    try {
+      const response: AxiosResponse<GHLCompanyResponse> = await this.axiosInstance.get(
+        `/companies/${companyId}`,
+        { headers: { Version: 'v3' } }
+      );
+
+      return this.wrapResponse(response.data);
+    } catch (error) {
+      throw this.handleApiError(error as AxiosError<GHLErrorResponse>);
+    }
+  }
+
+  /**
+   * Search agency users
+   * GET /users/search (current v3 contract)
+   */
+  async searchUsers(params: {
+    companyId: string;
+    locationId?: string;
+  }): Promise<GHLApiResponse<GHLUsersSearchResponse>> {
+    try {
+      const response: AxiosResponse<GHLUsersSearchResponse> = await this.axiosInstance.get(
+        '/users/search',
+        {
+          params,
+          headers: { Version: 'v3' }
+        }
+      );
+
+      return this.wrapResponse(response.data);
+    } catch (error) {
+      throw this.handleApiError(error as AxiosError<GHLErrorResponse>);
+    }
+  }
+
+  /**
+   * List agency snapshots
+   * GET /snapshots/ (current v3 contract)
+   */
+  async getSnapshots(): Promise<GHLApiResponse<GHLSnapshotsResponse>> {
+    try {
+      const response: AxiosResponse<GHLSnapshotsResponse> = await this.axiosInstance.get(
+        '/snapshots/',
+        { headers: { Version: 'v3' } }
+      );
+
+      return this.wrapResponse(response.data);
+    } catch (error) {
+      throw this.handleApiError(error as AxiosError<GHLErrorResponse>);
+    }
+  }
+
+  /**
    * Create a new location/sub-account
    * POST /locations/
    */
@@ -4373,22 +4433,26 @@ export class GHLApiClient {
   async getSurveySubmissions(request: GHLGetSurveySubmissionsRequest): Promise<GHLApiResponse<GHLGetSurveySubmissionsResponse>> {
     try {
       const locationId = request.locationId || this.config.locationId;
-      
-      const params = new URLSearchParams();
-      if (request.page) params.append('page', request.page.toString());
-      if (request.limit) params.append('limit', request.limit.toString());
-      if (request.surveyId) params.append('surveyId', request.surveyId);
-      if (request.q) params.append('q', request.q);
-      if (request.startAt) params.append('startAt', request.startAt);
-      if (request.endAt) params.append('endAt', request.endAt);
+
+      const params: Record<string, string> = { locationId };
+      if (request.page) params.page = request.page.toString();
+      if (request.limit) params.limit = request.limit.toString();
+      if (request.surveyId) params.surveyId = request.surveyId;
+      if (request.q) params.q = request.q;
+      if (request.startAt) params.startAt = request.startAt;
+      if (request.endAt) params.endAt = request.endAt;
 
       const response: AxiosResponse<GHLGetSurveySubmissionsResponse> = await this.axiosInstance.get(
-        `/locations/${locationId}/surveys/submissions?${params.toString()}`
+        '/surveys/submissions',
+        {
+          params,
+          headers: { Version: 'v3' }
+        }
       );
 
       return this.wrapResponse(response.data);
     } catch (error) {
-      throw error;
+      throw this.handleApiError(error as AxiosError<GHLErrorResponse>);
     }
   }
 
@@ -6825,4 +6889,4 @@ export class GHLApiClient {
       throw error;
     }
   }
-} 
+}
