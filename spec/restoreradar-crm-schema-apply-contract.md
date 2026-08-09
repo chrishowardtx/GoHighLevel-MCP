@@ -123,9 +123,12 @@ documentation gap.
 
 Every verification name starts with `RR TEST` and every external ID starts with
 `rr_test_`. Contacts have no email or phone and set global DND. The provider
-Business has no channel fields. Environment is `TEST`, homeowner consent is
+Business has no channel fields. Legacy Contact/Opportunity TEXT environment
+markers remain `TEST`; Business and Lead Assignment V2 properties use the
+canonical `test` option key whose label is `TEST`. Homeowner consent is
 `NOT_GRANTED`, and no consent timestamp is fabricated. Assignment state starts
-at `Queued`; Resend IDs and sent/delivered timestamps are absent.
+with the `queued` option key whose label is `Queued`; Resend IDs and
+sent/delivered timestamps are absent.
 
 The projection contains no IP address, user agent, or raw homeowner narrative.
 Only the Contact-to-RR-Lead-Assignment relation is created. Opportunity and
@@ -154,7 +157,12 @@ and halts on missing/repeated record IDs or repeated pages.
 V2 field readback is exact only when the server supplies a field ID and the
 field is under the resolved object namespace and intended RR folder ID. A
 same-name/key field in another folder is an incompatible collision, never an
-idempotent match.
+idempotent match. `SINGLE_OPTIONS` keys use the lowercase form returned by the
+server (`test`, `production`, `queued`, and the remaining assignment states),
+while their display labels retain the exact manifest case (`TEST`,
+`PRODUCTION`, `Queued`, and so on). Key and label comparison remains exact; a
+different key or label is an incompatible collision rather than a normalized
+match.
 
 Pipelines, legacy fields, custom objects, associations, V2 folders, and V2
 fields are never considered exact without nonempty server IDs. After apply,
@@ -176,6 +184,13 @@ without another object POST. The live partial-state regression reports one
 existing object and 67 planned schema creates in dry-run, then applies the
 remaining schema and unmistakable TEST records under the same suffix. A replay
 of that suffix performs zero mutations.
+
+If an accepted V2 option-field create is later read back with the canonical
+lowercase keys and exact labels, that field is recovered as existing without
+another POST. The normalized-environment regression starts from the object,
+its RR folder, and the six fields through `RR | Environment`, then verifies
+that recovery skips Environment, creates later option fields with canonical
+keys/labels, and replays with zero mutations.
 
 The receipt distinguishes transport acceptance from verification. Every
 mutating request that receives any 2xx response is appended immediately to
