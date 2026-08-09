@@ -1,0 +1,323 @@
+{
+  "schemaVersion": "rr-ghl-crm-schema/v1",
+  "identity": {
+    "companyId": "QrtXvBAldeRz6qcMX1Xt",
+    "locationId": "a7Caoa2IgRnZOazJLyAm"
+  },
+  "api": {
+    "baseUrl": "https://services.leadconnectorhq.com",
+    "version": "v3",
+    "credentials": {
+      "agency": {
+        "keychainService": "GHL_AGENCY_API_KEY"
+      },
+      "location": {
+        "keychainService": "GHL_RESTORERADAR_API_KEY"
+      }
+    }
+  },
+  "pipelines": [
+    {
+      "name": "RR | Homeowner Requests",
+      "stages": [
+        "Recorded",
+        "Validating",
+        "Routing Ready",
+        "Provider Engaged",
+        "Service Scheduled",
+        "Outcome Pending"
+      ]
+    },
+    {
+      "name": "RR | Provider Sales",
+      "stages": [
+        "Listed",
+        "Contacted",
+        "Claim Submitted",
+        "Verification",
+        "Claimed",
+        "Featured Interest",
+        "Checkout Created",
+        "Payment Confirmed",
+        "Manual Activation",
+        "Active",
+        "Churned"
+      ]
+    }
+  ],
+  "legacyFields": {
+    "contact": [
+      "RR | Homeowner External ID",
+      "RR | Environment",
+      "RR | Consent Status",
+      "RR | Consent Timestamp UTC",
+      "RR | Consent Version",
+      "RR | Source Event ID",
+      "RR | Projection Version"
+    ],
+    "opportunity": [
+      "RR | Request External ID",
+      "RR | Provider External ID",
+      "RR | GHL Business ID",
+      "RR | Environment",
+      "RR | Request Service",
+      "RR | Request City",
+      "RR | Request ZIP",
+      "RR | Request Urgency",
+      "RR | Consent Status",
+      "RR | Consent Timestamp UTC",
+      "RR | Consent Version",
+      "RR | Attribution Source",
+      "RR | Attribution Medium",
+      "RR | Attribution Campaign",
+      "RR | UTM Source",
+      "RR | UTM Medium",
+      "RR | UTM Campaign",
+      "RR | UTM Term",
+      "RR | UTM Content",
+      "RR | Referrer URL",
+      "RR | Landing Page",
+      "RR | GCLID",
+      "RR | FBCLID",
+      "RR | MSCLKID",
+      "RR | Form Version",
+      "RR | Source Event ID",
+      "RR | Source Recorded At UTC",
+      "RR | Projection Version"
+    ]
+  },
+  "business": {
+    "objectKey": "business",
+    "folder": "RR | Projection",
+    "fields": [
+      {
+        "name": "RR | External Provider ID",
+        "fieldKey": "business.rr_external_provider_id",
+        "dataType": "TEXT"
+      },
+      {
+        "name": "RR | Provider Slug",
+        "fieldKey": "business.rr_provider_slug",
+        "dataType": "TEXT"
+      },
+      {
+        "name": "RR | Environment",
+        "fieldKey": "business.rr_environment",
+        "dataType": "SINGLE_OPTIONS",
+        "options": [
+          {
+            "key": "TEST",
+            "label": "TEST"
+          },
+          {
+            "key": "PRODUCTION",
+            "label": "PRODUCTION"
+          }
+        ]
+      },
+      {
+        "name": "RR | Stripe Customer ID",
+        "fieldKey": "business.rr_stripe_customer_id",
+        "dataType": "TEXT"
+      },
+      {
+        "name": "RR | Stripe Subscription ID",
+        "fieldKey": "business.rr_stripe_subscription_id",
+        "dataType": "TEXT"
+      },
+      {
+        "name": "RR | Stripe Checkout Session ID",
+        "fieldKey": "business.rr_stripe_checkout_session_id",
+        "dataType": "TEXT"
+      },
+      {
+        "name": "RR | Stripe Payment Intent ID",
+        "fieldKey": "business.rr_stripe_payment_intent_id",
+        "dataType": "TEXT"
+      },
+      {
+        "name": "RR | Source Event ID",
+        "fieldKey": "business.rr_source_event_id",
+        "dataType": "TEXT"
+      },
+      {
+        "name": "RR | Projection Version",
+        "fieldKey": "business.rr_projection_version",
+        "dataType": "TEXT"
+      }
+    ]
+  },
+  "customObject": {
+    "labels": {
+      "singular": "RR Lead Assignment",
+      "plural": "RR Lead Assignments"
+    },
+    "key": "custom_objects.rr_lead_assignment",
+    "description": "RestoreRadar operational projection of one request-to-provider offer.",
+    "primaryDisplayPropertyDetails": {
+      "key": "custom_objects.rr_lead_assignment.rr_assignment_id",
+      "name": "RR Assignment ID",
+      "dataType": "TEXT"
+    },
+    "folder": "RR | Projection",
+    "fields": [
+      {
+        "suffix": "rr_external_request_id",
+        "name": "RR | External Request ID",
+        "dataType": "TEXT"
+      },
+      {
+        "suffix": "rr_external_provider_id",
+        "name": "RR | External Provider ID",
+        "dataType": "TEXT"
+      },
+      {
+        "suffix": "rr_ghl_contact_id",
+        "name": "RR | GHL Contact ID",
+        "dataType": "TEXT"
+      },
+      {
+        "suffix": "rr_ghl_opportunity_id",
+        "name": "RR | GHL Opportunity ID",
+        "dataType": "TEXT"
+      },
+      {
+        "suffix": "rr_ghl_business_id",
+        "name": "RR | GHL Business ID",
+        "dataType": "TEXT"
+      },
+      {
+        "suffix": "rr_environment",
+        "name": "RR | Environment",
+        "dataType": "SINGLE_OPTIONS",
+        "options": [
+          {
+            "key": "TEST",
+            "label": "TEST"
+          },
+          {
+            "key": "PRODUCTION",
+            "label": "PRODUCTION"
+          }
+        ]
+      },
+      {
+        "suffix": "rr_assignment_state",
+        "name": "RR | Assignment State",
+        "dataType": "SINGLE_OPTIONS",
+        "options": [
+          {
+            "key": "Queued",
+            "label": "Queued"
+          },
+          {
+            "key": "Sent",
+            "label": "Sent"
+          },
+          {
+            "key": "Delivered",
+            "label": "Delivered"
+          },
+          {
+            "key": "Acknowledged",
+            "label": "Acknowledged"
+          },
+          {
+            "key": "Contacted",
+            "label": "Contacted"
+          },
+          {
+            "key": "Accepted",
+            "label": "Accepted"
+          },
+          {
+            "key": "Declined",
+            "label": "Declined"
+          },
+          {
+            "key": "Expired",
+            "label": "Expired"
+          }
+        ]
+      },
+      {
+        "suffix": "rr_resend_message_id",
+        "name": "RR | Resend Message ID",
+        "dataType": "TEXT"
+      },
+      {
+        "suffix": "rr_resend_event_id",
+        "name": "RR | Resend Event ID",
+        "dataType": "TEXT"
+      },
+      {
+        "suffix": "rr_source_event_id",
+        "name": "RR | Source Event ID",
+        "dataType": "TEXT"
+      },
+      {
+        "suffix": "rr_projection_version",
+        "name": "RR | Projection Version",
+        "dataType": "TEXT"
+      },
+      {
+        "suffix": "rr_queued_at_utc",
+        "name": "RR | Queued At UTC",
+        "dataType": "TEXT"
+      },
+      {
+        "suffix": "rr_sent_at_utc",
+        "name": "RR | Sent At UTC",
+        "dataType": "TEXT"
+      },
+      {
+        "suffix": "rr_delivered_at_utc",
+        "name": "RR | Delivered At UTC",
+        "dataType": "TEXT"
+      },
+      {
+        "suffix": "rr_acknowledged_at_utc",
+        "name": "RR | Acknowledged At UTC",
+        "dataType": "TEXT"
+      },
+      {
+        "suffix": "rr_contacted_at_utc",
+        "name": "RR | Contacted At UTC",
+        "dataType": "TEXT"
+      },
+      {
+        "suffix": "rr_decided_at_utc",
+        "name": "RR | Decided At UTC",
+        "dataType": "TEXT"
+      },
+      {
+        "suffix": "rr_expires_at_utc",
+        "name": "RR | Expires At UTC",
+        "dataType": "TEXT"
+      }
+    ]
+  },
+  "association": {
+    "key": "rr_homeowner_lead_assignments",
+    "firstObjectLabel": "Homeowner",
+    "firstObjectKey": "contact",
+    "secondObjectLabel": "Lead Assignments",
+    "secondObjectKey": "custom_objects.rr_lead_assignment"
+  },
+  "testRecords": {
+    "tags": [
+      "rr:test",
+      "rr:schema-verification"
+    ],
+    "environment": "TEST",
+    "consentStatus": "NOT_GRANTED",
+    "projectionVersion": "rr-ghl-crm-schema/v1"
+  },
+  "prohibitedProjectionFields": [
+    "ip",
+    "ipAddress",
+    "userAgent",
+    "rawNarrative",
+    "homeownerNarrative"
+  ]
+}

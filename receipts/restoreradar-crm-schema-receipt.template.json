@@ -1,0 +1,60 @@
+{
+  "receiptVersion": "rr-ghl-crm-schema-receipt/v1",
+  "schemaVersion": "rr-ghl-crm-schema/v1",
+  "generatedAt": "<ISO-8601 UTC>",
+  "mode": "dry-run|apply",
+  "verdict": "READY|APPLIED|HALTED",
+  "baseUrl": "https://services.leadconnectorhq.com",
+  "apiVersion": "v3",
+  "expectedIdentity": {
+    "companyId": "QrtXvBAldeRz6qcMX1Xt",
+    "locationId": "a7Caoa2IgRnZOazJLyAm"
+  },
+  "observedIdentity": {
+    "agencyCompanyId": "<verified company id from agency credential>",
+    "locationCompanyId": "<verified company id from location credential>",
+    "locationId": "<verified location id>"
+  },
+  "credentials": {
+    "agency": {
+      "source": "inherited-env|macOS-keychain",
+      "printed": false,
+      "persisted": false
+    },
+    "location": {
+      "source": "inherited-env|macOS-keychain",
+      "printed": false,
+      "persisted": false
+    }
+  },
+  "summary": {
+    "existing": 0,
+    "plannedCreates": 0,
+    "acceptedCreates": 0,
+    "completedCreates": 0,
+    "collisions": 0
+  },
+  "actions": [],
+  "acceptedCreates": [],
+  "completed": [],
+  "collisions": [],
+  "blockers": [],
+  "requests": [],
+  "responseShapes": [],
+  "notProven": [],
+  "testVerification": {
+    "suffix": "<YYYYMMDDTHHMMSSZ|null>",
+    "recordsRead": false,
+    "recordsWritten": false
+  },
+  "safety": {
+    "updatesAttempted": 0,
+    "deletesAttempted": 0,
+    "communicationsAttempted": 0,
+    "workflowWritesAttempted": 0,
+    "snapshotLoadsAttempted": 0,
+    "containsCredentials": false,
+    "containsProjectedIpOrUserAgent": false,
+    "containsRawHomeownerNarrative": false
+  }
+}
