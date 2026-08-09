@@ -90,6 +90,14 @@ incompatible collision. A nonempty value under any unknown readback key is
 also a collision rather than an empty placeholder. Opportunity requests continue to use
 `{id, fieldValue}` independently.
 
+A controlled RestoreRadar retry on 2026-08-09 proved that a channel-less Contact
+create with only `name` is rejected: the transport returned HTTP 400 with a
+sanitized response body carrying `statusCode: 422` and the message `Contacts
+without email, phone, firstName and lastName are not allowed.` The tool therefore
+retains the deterministic full `name` and also sends deterministic `firstName`
+and `lastName` values for each unmistakable TEST Contact. No email or phone is
+added.
+
 ## Fail-closed ambiguities
 
 The Objects API documents plural keys such as `custom_objects.pet`. The Custom
@@ -144,6 +152,15 @@ canonical `test` option key whose label is `TEST`. Homeowner consent is
 `NOT_GRANTED`, and no consent timestamp is fabricated. Assignment state starts
 with the `queued` option key whose label is `Queued`; Resend IDs and
 sent/delivered timestamps are absent.
+
+Each TEST Contact uses `firstName: "RR TEST"`. The homeowner uses `lastName:
+"Homeowner <test-suffix>"`; the provider Contact uses `lastName: "Provider
+Contact <test-suffix>"`. Its full `name` must be the exact concatenation of
+`firstName`, one space, and `lastName`. The pre-dispatch TEST-record guard
+requires all three values, global DND, and the absence of email and phone. Exact
+list/direct readback requires the same contract. A missing or changed first
+name, last name, or full name is an incompatible collision, so replay cannot
+silently adopt a differently named Contact.
 
 Before dispatch, each TEST Contact custom-field request item is independently
 guarded as an exact, unique `{id, fieldValue}` pair. Neither the response-only

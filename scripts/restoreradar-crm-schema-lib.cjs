@@ -1356,14 +1356,22 @@ async function applySchema(locationClient, manifest, receipt) {
 }
 
 function testIds(suffix) {
+  const homeownerFirstName = 'RR TEST';
+  const homeownerLastName = `Homeowner ${suffix}`;
+  const providerFirstName = 'RR TEST';
+  const providerLastName = `Provider Contact ${suffix}`;
   return {
     homeownerExternalId: `rr_test_homeowner_${suffix}`,
     providerExternalId: `rr_test_provider_${suffix}`,
     requestExternalId: `rr_test_request_${suffix}`,
     assignmentExternalId: `rr_test_assignment_${suffix}`,
     sourceEventId: `rr_test_event_${suffix}`,
-    homeownerName: `RR TEST Homeowner ${suffix}`,
-    providerName: `RR TEST Provider Contact ${suffix}`,
+    homeownerFirstName,
+    homeownerLastName,
+    homeownerName: `${homeownerFirstName} ${homeownerLastName}`,
+    providerFirstName,
+    providerLastName,
+    providerName: `${providerFirstName} ${providerLastName}`,
     businessName: `RR TEST Provider Business ${suffix}`,
     homeownerOpportunityName: `RR TEST Homeowner Request ${suffix}`,
     providerOpportunityName: `RR TEST Provider Sale ${suffix}`
@@ -1392,6 +1400,8 @@ function buildContactPayloads({ manifest, suffix, fieldIds }) {
     homeowner: {
       ...shared,
       name: ids.homeownerName,
+      firstName: ids.homeownerFirstName,
+      lastName: ids.homeownerLastName,
       customFields: customValues(fieldIds, {
         'RR | Homeowner External ID': ids.homeownerExternalId,
         'RR | Environment': manifest.testRecords.legacyEnvironment,
@@ -1404,6 +1414,8 @@ function buildContactPayloads({ manifest, suffix, fieldIds }) {
     provider: {
       ...shared,
       name: ids.providerName,
+      firstName: ids.providerFirstName,
+      lastName: ids.providerLastName,
       customFields: customValues(fieldIds, {
         'RR | Environment': manifest.testRecords.legacyEnvironment,
         'RR | Consent Status': manifest.testRecords.consentStatus,
@@ -1543,8 +1555,16 @@ function assertNoProhibitedPayloadData(payload, manifest) {
 }
 
 function assertTestContact(payload) {
-  if (!payload?.name?.startsWith('RR TEST ') || payload.dnd !== true) {
-    throw new GuardError('TEST_RECORD_GUARD', 'TEST contact must be unmistakably named and DND');
+  if (
+    payload?.firstName !== 'RR TEST' ||
+    !/^(Homeowner|Provider Contact) \d{8}T\d{6}Z$/.test(payload?.lastName || '') ||
+    payload?.name !== `${payload.firstName} ${payload.lastName}` ||
+    payload.dnd !== true
+  ) {
+    throw new GuardError(
+      'TEST_RECORD_GUARD',
+      'TEST contact must have exact unmistakable first/last/full names and DND'
+    );
   }
   if ('email' in payload || 'phone' in payload) {
     throw new GuardError('TEST_RECORD_GUARD', 'TEST contact must not contain email or phone channels');
@@ -1647,6 +1667,8 @@ function exactTestContactReadback(contact, expected) {
   const expectedTags = [...new Set(expected.tags)].sort();
   const actualTags = [...new Set(tags)].sort();
   return contact?.name === expected.name &&
+    contact?.firstName === expected.firstName &&
+    contact?.lastName === expected.lastName &&
     contact?.dnd === true &&
     !contact?.email &&
     !contact?.phone &&
@@ -2408,6 +2430,7 @@ module.exports = {
   HighLevelClient,
   applySchema,
   assertNoProhibitedPayloadData,
+  assertTestContact,
   buildAssignmentRecordPayload,
   buildBusinessRecordPayload,
   buildContactPayloads,

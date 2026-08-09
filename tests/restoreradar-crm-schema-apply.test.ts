@@ -4,6 +4,7 @@ const {
   DEFAULT_READBACK_RETRY_DELAYS_MS,
   HighLevelClient,
   assertNoProhibitedPayloadData,
+  assertTestContact,
   buildAssignmentRecordPayload,
   buildBusinessRecordPayload,
   buildContactPayloads,
@@ -305,6 +306,8 @@ function completeRouter(call: FetchCall, overrides: {
     | 'v2-field';
   unsafeRecord?:
     | 'contact'
+    | 'contact-missing-first-name'
+    | 'contact-wrong-last-name'
     | 'contact-conflicting-alias'
     | 'contact-unknown-value-alias'
     | 'contact-extra-tag'
@@ -472,6 +475,12 @@ function completeRouter(call: FetchCall, overrides: {
       })),
       { id: 'empty_contact_placeholder', value: '' }
     ];
+    if (overrides.unsafeRecord === 'contact-missing-first-name') {
+      delete contact.firstName;
+    }
+    if (overrides.unsafeRecord === 'contact-wrong-last-name') {
+      contact.lastName = `Wrong ${TEST_SUFFIX}`;
+    }
     if (overrides.unsafeRecord === 'contact') {
       contact.customFields = [
         ...contact.customFields,
@@ -1421,6 +1430,26 @@ describe('RestoreRadar guarded CRM schema apply tool', () => {
     )).toEqual([]);
   });
 
+  test.each([
+    'contact-missing-first-name',
+    'contact-wrong-last-name'
+  ])('fails replay closed on an existing TEST %s readback', async (unsafeRecord: any) => {
+    const { calls, fetchImpl } = mockFetch((call) => completeRouter(call, { unsafeRecord }));
+    const result = await runSchemaTool({
+      argv: requiredArgs(['--apply', '--test-suffix', TEST_SUFFIX]),
+      fetchImpl,
+      env: credentialEnv(),
+      now: () => NOW
+    });
+    expect(result.receipt.verdict).toBe('HALTED');
+    expect(result.receipt.haltReason.code).toBe('INCOMPATIBLE_COLLISION');
+    expect(calls.filter((call) =>
+      call.method === 'POST' &&
+      call.url.pathname !== '/contacts/search' &&
+      !call.url.pathname.endsWith('/records/search')
+    )).toEqual([]);
+  });
+
   test('dry-run explicitly records no TEST reads or writes even when a suffix is supplied', async () => {
     const { calls, fetchImpl } = mockFetch((call) => emptyDiscoveryRouter(call));
     const result = await runSchemaTool({
@@ -1902,6 +1931,51 @@ describe('RestoreRadar guarded CRM schema apply tool', () => {
     expect(receiptText).not.toContain(requestEchoMarker);
     expect(receiptText).not.toContain(headersEchoMarker);
     expect(receiptText).not.toContain(bodyEchoMarker);
+  });
+
+  test('records the live no-channel 400/422 Contact rejection without accepting a create', async () => {
+    const server = statefulMissingSchemaServer();
+    seedCompleteSchemaState(server);
+    const liveMessage = 'Contacts without email, phone, firstName and lastName are not allowed.';
+    const { calls, fetchImpl } = mockFetch((call) => {
+      if (call.method === 'POST' && call.url.pathname === '/contacts/') {
+        return jsonResponse({ statusCode: 422, message: liveMessage }, 400);
+      }
+      return server.router(call);
+    });
+    const result = await runSchemaTool({
+      argv: requiredArgs(['--apply', '--test-suffix', TEST_SUFFIX]),
+      fetchImpl,
+      env: credentialEnv(),
+      now: () => NOW
+    });
+    const contactPosts = calls.filter((call) =>
+      call.method === 'POST' && call.url.pathname === '/contacts/'
+    );
+
+    expect(result.exitCode).toBe(2);
+    expect(result.receipt.haltReason).toEqual({
+      code: 'API_ERROR',
+      message: 'HighLevel returned HTTP 400 for POST /contacts/',
+      apiResponse: { statusCode: 422, message: liveMessage }
+    });
+    expect(result.receipt.summary).toMatchObject({
+      existing: 68,
+      plannedCreates: 0,
+      acceptedCreates: 0,
+      completedCreates: 0
+    });
+    expect(contactPosts).toHaveLength(1);
+    expect(contactPosts[0].body).toMatchObject({
+      name: `RR TEST Homeowner ${TEST_SUFFIX}`,
+      firstName: 'RR TEST',
+      lastName: `Homeowner ${TEST_SUFFIX}`,
+      dnd: true
+    });
+    expect(contactPosts[0].body).not.toHaveProperty('email');
+    expect(contactPosts[0].body).not.toHaveProperty('phone');
+    expect(result.receipt.acceptedCreates).toEqual([]);
+    expect(result.receipt.completed).toEqual([]);
   });
 
   test('redacts short string, numeric, and boolean request scalars from API diagnostics', async () => {
@@ -2432,6 +2506,22 @@ describe('RestoreRadar guarded CRM schema apply tool', () => {
     });
     expect(firstMutationPosts).toHaveLength(7);
     expect(contactPosts).toHaveLength(2);
+    expect(contactPosts.map((call) => ({
+      name: call.body.name,
+      firstName: call.body.firstName,
+      lastName: call.body.lastName
+    }))).toEqual([
+      {
+        name: `RR TEST Homeowner ${TEST_SUFFIX}`,
+        firstName: 'RR TEST',
+        lastName: `Homeowner ${TEST_SUFFIX}`
+      },
+      {
+        name: `RR TEST Provider Contact ${TEST_SUFFIX}`,
+        firstName: 'RR TEST',
+        lastName: `Provider Contact ${TEST_SUFFIX}`
+      }
+    ]);
     for (const contactPost of contactPosts) {
       expect(contactPost.body.name).toMatch(/^RR TEST /);
       expect(contactPost.body.dnd).toBe(true);
@@ -2444,6 +2534,15 @@ describe('RestoreRadar guarded CRM schema apply tool', () => {
         expect(customField).not.toHaveProperty('field_value');
       }
     }
+    expect(server.state.contacts.map((contact: any) => ({
+      name: contact.name,
+      firstName: contact.firstName,
+      lastName: contact.lastName
+    }))).toEqual(contactPosts.map((call) => ({
+      name: call.body.name,
+      firstName: call.body.firstName,
+      lastName: call.body.lastName
+    })));
     expect(opportunityPosts).toHaveLength(2);
     for (const opportunityPost of opportunityPosts) {
       expect(opportunityPost.body.customFields.length).toBeGreaterThan(0);
@@ -2916,6 +3015,9 @@ describe('RestoreRadar guarded CRM schema apply tool', () => {
       expect(contact).not.toHaveProperty('email');
       expect(contact).not.toHaveProperty('phone');
       expect(contact.name).toMatch(/^RR TEST /);
+      expect(contact.firstName).toBe('RR TEST');
+      expect(contact.name).toBe(`${contact.firstName} ${contact.lastName}`);
+      expect(contact.lastName).toMatch(/^(Homeowner|Provider Contact) \d{8}T\d{6}Z$/);
       expect(contact.customFields).toContainEqual({
         id: contactFieldIds['RR | Environment'],
         fieldValue: 'TEST'
@@ -2949,6 +3051,41 @@ describe('RestoreRadar guarded CRM schema apply tool', () => {
       expect(JSON.stringify(payload)).not.toMatch(/ipAddress|userAgent|rawNarrative|homeownerNarrative/);
     }
     expect(JSON.stringify({ contacts, business, opportunities, assignment })).not.toContain(TOKEN);
+  });
+
+  test('the independent TEST contact guard requires exact no-channel first and last names', () => {
+    const fixture = completeFixture();
+    const fieldIds = Object.fromEntries(
+      fixture.legacyFields
+        .filter((field: any) => field.model === 'contact')
+        .map((field: any) => [field.name, field.id])
+    );
+    const payload = buildContactPayloads({
+      manifest: fixture.manifest,
+      suffix: TEST_SUFFIX,
+      fieldIds
+    }).homeowner;
+
+    expect(() => assertTestContact(payload)).not.toThrow();
+    for (const mutate of [
+      (candidate: any) => { delete candidate.firstName; },
+      (candidate: any) => { delete candidate.lastName; },
+      (candidate: any) => { candidate.firstName = 'Homeowner'; },
+      (candidate: any) => { candidate.lastName = `Wrong ${TEST_SUFFIX}`; },
+      (candidate: any) => { candidate.name = `RR TEST Mismatch ${TEST_SUFFIX}`; },
+      (candidate: any) => { candidate.email = 'blocked@example.test'; },
+      (candidate: any) => { candidate.phone = '+15125550199'; }
+    ]) {
+      const candidate = JSON.parse(JSON.stringify(payload));
+      mutate(candidate);
+      let caught;
+      try {
+        assertTestContact(candidate);
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toMatchObject({ code: 'TEST_RECORD_GUARD' });
+    }
   });
 
   test.each([
