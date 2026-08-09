@@ -80,6 +80,16 @@ metadata, not authoritative relation identity. The tool ignores every relation
 response body shape and uses only its pinned HTTP 201 status plus two-sided list
 readback. A different 2xx status is still recorded as accepted and then halts.
 
+The current v3 [Create Contact](https://marketplace.gohighlevel.com/docs/ghl/contacts/create-contact/)
+request contract uses `customFields` items shaped as `{id, fieldValue}`;
+`field_value` is deprecated. Contact response, GET, and webhook representations
+may instead expose `{id, value}`. The tool keeps the documented request shape,
+accepts any one unambiguous readback value among `value`, `fieldValue`, and
+`field_value`, and treats conflicting aliases on one returned field as an
+incompatible collision. A nonempty value under any unknown readback key is
+also a collision rather than an empty placeholder. Opportunity requests continue to use
+`{id, fieldValue}` independently.
+
 ## Fail-closed ambiguities
 
 The Objects API documents plural keys such as `custom_objects.pet`. The Custom
@@ -134,6 +144,10 @@ canonical `test` option key whose label is `TEST`. Homeowner consent is
 `NOT_GRANTED`, and no consent timestamp is fabricated. Assignment state starts
 with the `queued` option key whose label is `Queued`; Resend IDs and
 sent/delivered timestamps are absent.
+
+Before dispatch, each TEST Contact custom-field request item is independently
+guarded as an exact, unique `{id, fieldValue}` pair. Neither the response-only
+`value` key nor deprecated `field_value` can enter a Contact create request.
 
 The projection contains no IP address, user agent, or raw homeowner narrative.
 Only the Contact-to-RR-Lead-Assignment relation is created. Opportunity and
@@ -215,6 +229,15 @@ A non-2xx mutation is recorded in `requests` with its HTTP status,
 location-scoped `POST /objects/` halts immediately with zero accepted and zero
 completed creates; no later POST is attempted and no credential value enters
 the receipt.
+
+For a non-2xx response, the halt receipt may retain only the top-level API
+fields `statusCode`, `error`, and `message` (string or a bounded string list).
+Diagnostic bodies and messages have fixed size limits. Credential values,
+Bearer material, request-body scalar values, email-like values, phone-like
+values, long token-like strings, control characters, and every non-allowlisted
+response field are removed or redacted. Request bodies and headers are never
+copied into the receipt. Empty, invalid JSON, and oversized error bodies retain
+only the generic HTTP/method/path halt message.
 
 Once the final schema readback is exact, the receipt replaces the preliminary
 plan and its summary before any TEST write begins. A later partial TEST halt
