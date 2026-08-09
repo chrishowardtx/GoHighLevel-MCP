@@ -11,13 +11,21 @@
     "locationId": "a7Caoa2IgRnZOazJLyAm"
   },
   "observedIdentity": {
-    "companyId": "<verified company id>",
+    "agencyCompanyId": "<verified company id from agency credential>",
+    "locationCompanyId": "<verified company id from location credential>",
     "locationId": "<verified location id>"
   },
-  "credential": {
-    "source": "inherited-env|macOS-keychain",
-    "printed": false,
-    "persisted": false
+  "credentials": {
+    "agency": {
+      "source": "inherited-env|macOS-keychain",
+      "printed": false,
+      "persisted": false
+    },
+    "location": {
+      "source": "inherited-env|macOS-keychain",
+      "printed": false,
+      "persisted": false
+    }
   },
   "summary": {
     "existing": 0,

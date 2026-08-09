@@ -7,7 +7,14 @@
   "api": {
     "baseUrl": "https://services.leadconnectorhq.com",
     "version": "v3",
-    "keychainService": "GHL_RESTORERADAR_API_KEY"
+    "credentials": {
+      "agency": {
+        "keychainService": "GHL_AGENCY_API_KEY"
+      },
+      "location": {
+        "keychainService": "GHL_RESTORERADAR_API_KEY"
+      }
+    }
   },
   "pipelines": [
     {

@@ -11,7 +11,15 @@ const DEFAULT_MANIFEST_PATH = path.resolve(
   '../spec/restoreradar-crm-schema-v1.json'
 );
 
-const READ_ENDPOINTS = [
+const AGENCY_READ_ENDPOINTS = [
+  ['GET', /^\/companies\/[^/]+$/]
+];
+
+const AGENCY_MUTATION_ENDPOINTS = [
+  ['POST', /^\/objects\/$/]
+];
+
+const LOCATION_READ_ENDPOINTS = [
   ['GET', /^\/locations\/[^/]+$/],
   ['GET', /^\/opportunities\/pipelines$/],
   ['GET', /^\/locations\/[^/]+\/customFields$/],
@@ -30,12 +38,11 @@ const READ_ENDPOINTS = [
   ['POST', /^\/objects\/[^/]+\/records\/search$/]
 ];
 
-const MUTATION_ENDPOINTS = [
+const LOCATION_MUTATION_ENDPOINTS = [
   ['POST', /^\/opportunities\/pipelines$/],
   ['POST', /^\/locations\/[^/]+\/customFields$/],
   ['POST', /^\/custom-fields\/folder$/],
   ['POST', /^\/custom-fields\/$/],
-  ['POST', /^\/objects\/$/],
   ['POST', /^\/associations\/$/],
   ['POST', /^\/contacts\/$/],
   ['POST', /^\/opportunities\/$/],
@@ -78,6 +85,18 @@ function loadManifest(manifestPath = DEFAULT_MANIFEST_PATH) {
     throw new GuardError('VERSION_MISMATCH', 'Manifest does not pin the current v3 API version');
   }
   return manifest;
+}
+
+function timestampFromTestSuffix(suffix) {
+  if (!/^\d{8}T\d{6}Z$/.test(String(suffix || ''))) {
+    throw new GuardError('INVALID_TEST_SUFFIX', '--test-suffix must match YYYYMMDDTHHMMSSZ');
+  }
+  const iso = `${suffix.slice(0, 4)}-${suffix.slice(4, 6)}-${suffix.slice(6, 8)}T${suffix.slice(9, 11)}:${suffix.slice(11, 13)}:${suffix.slice(13, 15)}.000Z`;
+  const parsed = new Date(iso);
+  if (Number.isNaN(parsed.getTime()) || parsed.toISOString() !== iso) {
+    throw new GuardError('INVALID_TEST_SUFFIX', '--test-suffix is not a real UTC timestamp');
+  }
+  return iso;
 }
 
 function parseArgs(argv, manifest) {
@@ -131,9 +150,7 @@ function parseArgs(argv, manifest) {
       'Apply mode requires --test-suffix YYYYMMDDTHHMMSSZ so verification records are idempotent'
     );
   }
-  if (options.testSuffix && !/^\d{8}T\d{6}Z$/.test(options.testSuffix)) {
-    throw new GuardError('INVALID_TEST_SUFFIX', '--test-suffix must match YYYYMMDDTHHMMSSZ');
-  }
+  if (options.testSuffix) timestampFromTestSuffix(options.testSuffix);
   return options;
 }
 
@@ -145,19 +162,19 @@ function defaultKeychainReader(service) {
   ).trim();
 }
 
-function resolveCredential({ env, manifest, keychainReader = defaultKeychainReader }) {
-  const inherited = env[manifest.api.keychainService];
+function resolveCredential({ env, service, keychainReader = defaultKeychainReader }) {
+  const inherited = env[service];
   if (typeof inherited === 'string' && inherited.trim()) {
     return { token: inherited.trim(), source: 'inherited-env' };
   }
 
   let token = '';
   try {
-    token = keychainReader(manifest.api.keychainService);
+    token = keychainReader(service);
   } catch {
     throw new GuardError(
       'CREDENTIAL_UNAVAILABLE',
-      `RestoreRadar credential is unavailable from inherited env or Keychain service ${manifest.api.keychainService}`
+      `Credential is unavailable from inherited env or Keychain service ${service}`
     );
   }
   if (typeof token !== 'string' || !token.trim()) {
@@ -184,7 +201,7 @@ function sanitizeError(error) {
 }
 
 class HighLevelClient {
-  constructor({ token, fetchImpl, apply, receipt, locationId }) {
+  constructor({ token, fetchImpl, apply, receipt, locationId, companyId, role }) {
     if (typeof fetchImpl !== 'function') {
       throw new GuardError('FETCH_UNAVAILABLE', 'A fetch implementation is required');
     }
@@ -193,15 +210,23 @@ class HighLevelClient {
     this.apply = apply;
     this.receipt = receipt;
     this.locationId = locationId;
+    this.companyId = companyId;
+    if (role !== 'agency' && role !== 'location') {
+      throw new GuardError('CREDENTIAL_ROLE_REQUIRED', 'Client role must be agency or location');
+    }
+    this.role = role;
   }
 
-  async request(method, endpoint, { query, body, mutating = false } = {}) {
+  async request(method, endpoint, { query, body, mutating = false, expectedStatus } = {}) {
     method = method.toUpperCase();
-    if (!endpoint.startsWith('/')) {
+    if (!/^\/[^/]/.test(endpoint)) {
       throw new GuardError('ENDPOINT_NOT_RELATIVE', 'HighLevel endpoint must be a relative path');
     }
 
     const url = new URL(endpoint, OFFICIAL_BASE_URL);
+    if (url.origin !== OFFICIAL_BASE_URL) {
+      throw new GuardError('FOREIGN_ORIGIN_BLOCKED', 'HighLevel request origin is not the pinned official origin');
+    }
     const pathname = url.pathname;
     if (FORBIDDEN_ENDPOINT_PARTS.some((part) => pathname.includes(part))) {
       throw new GuardError('FORBIDDEN_ENDPOINT', `Forbidden HighLevel endpoint: ${pathname}`);
@@ -209,15 +234,25 @@ class HighLevelClient {
     if (method === 'PUT' || method === 'PATCH' || method === 'DELETE') {
       throw new GuardError('FORBIDDEN_METHOD', `${method} is never allowed by the additive schema tool`);
     }
+    const readRules = this.role === 'agency' ? AGENCY_READ_ENDPOINTS : LOCATION_READ_ENDPOINTS;
+    const mutationRules = this.role === 'agency'
+      ? AGENCY_MUTATION_ENDPOINTS
+      : LOCATION_MUTATION_ENDPOINTS;
     if (mutating) {
       if (!this.apply) {
         throw new GuardError('MUTATION_OPT_IN_REQUIRED', 'Mutation blocked because --apply was not supplied');
       }
-      if (!endpointAllowed(method, pathname, MUTATION_ENDPOINTS)) {
-        throw new GuardError('MUTATION_ENDPOINT_NOT_ALLOWLISTED', `${method} ${pathname} is not allowlisted`);
+      if (!endpointAllowed(method, pathname, mutationRules)) {
+        throw new GuardError(
+          'MUTATION_ENDPOINT_NOT_ALLOWLISTED',
+          `${this.role} credential cannot call ${method} ${pathname}`
+        );
       }
-    } else if (!endpointAllowed(method, pathname, READ_ENDPOINTS)) {
-      throw new GuardError('READ_ENDPOINT_NOT_ALLOWLISTED', `${method} ${pathname} is not allowlisted`);
+    } else if (!endpointAllowed(method, pathname, readRules)) {
+      throw new GuardError(
+        'READ_ENDPOINT_NOT_ALLOWLISTED',
+        `${this.role} credential cannot call ${method} ${pathname}`
+      );
     }
 
     const pathLocationMatch = pathname.match(/^\/locations\/([^/]+)/);
@@ -229,6 +264,13 @@ class HighLevelClient {
     }
     if (body?.locationId && body.locationId !== this.locationId) {
       throw new GuardError('CROSS_LOCATION_BLOCKED', 'Location payload does not match RestoreRadar');
+    }
+    const pathCompanyMatch = pathname.match(/^\/companies\/([^/]+)/);
+    if (pathCompanyMatch && decodeURIComponent(pathCompanyMatch[1]) !== this.companyId) {
+      throw new GuardError('CROSS_COMPANY_BLOCKED', 'Company path does not match RestoreRadar agency');
+    }
+    if (body?.companyId && body.companyId !== this.companyId) {
+      throw new GuardError('CROSS_COMPANY_BLOCKED', 'Company payload does not match RestoreRadar agency');
     }
 
     for (const [key, value] of Object.entries(query || {})) {
@@ -244,6 +286,7 @@ class HighLevelClient {
       method,
       path: pathname,
       version: API_VERSION,
+      credentialRole: this.role,
       semantic: mutating ? 'create' : 'read',
       status: null
     };
@@ -268,6 +311,12 @@ class HighLevelClient {
 
     requestReceipt.status = response.status;
     if (!response.ok) throw new ApiError(response.status, method, pathname);
+    if (expectedStatus !== undefined && response.status !== expectedStatus) {
+      throw new GuardError(
+        'UNEXPECTED_SUCCESS_STATUS',
+        `HighLevel returned HTTP ${response.status}; expected ${expectedStatus} for ${method} ${pathname}`
+      );
+    }
     const text = await response.text();
     if (!text.trim()) return {};
     try {
@@ -314,13 +363,30 @@ function requireObject(payload, paths, resource, receipt) {
   throw new GuardError('RESPONSE_SHAPE_UNKNOWN', `No supported ${resource} object was found in the response`);
 }
 
-async function verifyIdentity(client, manifest, receipt) {
+async function verifyAgencyIdentity(client, manifest, receipt) {
+  const payload = await client.request(
+    'GET',
+    `/companies/${encodeURIComponent(manifest.identity.companyId)}`
+  );
+  const company = requireObject(payload, ['company', 'data.company'], 'agencyIdentity', receipt);
+  const observedCompanyId = company.id || company.companyId;
+  receipt.observedIdentity.agencyCompanyId = observedCompanyId || null;
+  if (observedCompanyId !== manifest.identity.companyId) {
+    throw new GuardError(
+      'AGENCY_TOKEN_COMPANY_IDENTITY_MISMATCH',
+      'Agency token/company identity did not match the pinned RestoreRadar company'
+    );
+  }
+}
+
+async function verifyLocationIdentity(client, manifest, receipt) {
   const payload = await client.request('GET', `/locations/${encodeURIComponent(manifest.identity.locationId)}`);
   const location = requireObject(payload, ['location', 'data.location', '$'], 'locationIdentity', receipt);
   const observedLocationId = location.id || location.locationId;
   const observedCompanyId = location.companyId || location.company_id;
   receipt.observedIdentity = {
-    companyId: observedCompanyId || null,
+    ...receipt.observedIdentity,
+    locationCompanyId: observedCompanyId || null,
     locationId: observedLocationId || null
   };
   if (
@@ -501,27 +567,44 @@ function findAssociation(associations, expected) {
   return { state: 'exact', value: association };
 }
 
-function customFieldPrefixFromReadback(manifest, v2Fields, objectDetails) {
-  const suffix = 'rr_assignment_id';
-  const sources = [
-    v2Fields.map((field) => field?.fieldKey),
-    objectDetails.fields.map((field) => field?.fieldKey),
-    [objectDetails.object?.primaryDisplayProperty]
-  ];
-  const candidates = sources
-    .map((source) => source.filter(
-      (fieldKey) => typeof fieldKey === 'string' && fieldKey.endsWith(`.${suffix}`)
-    ))
-    .find((source) => source.length > 0) || [];
-  const prefixes = [...new Set(candidates.map((fieldKey) => fieldKey.slice(0, -suffix.length)))];
-  if (!prefixes.length) return { state: 'unknown' };
-  if (prefixes.length !== 1 || !/^custom_objects?\.rr_lead_assignment\.$/.test(prefixes[0])) {
+function customObjectV2NamespaceFromReadback(manifest, v2Fields, v2Folders) {
+  const allowed = /^custom_objects?\.rr_lead_assignment$/;
+  const evidence = [];
+  let primaryFieldSeen = false;
+  for (const field of v2Fields) {
+    if (typeof field?.objectKey === 'string' && field.objectKey) {
+      evidence.push({ source: `field.objectKey:${field.id || 'unknown'}`, value: field.objectKey });
+    }
+    if (typeof field?.fieldKey === 'string' && field.fieldKey) {
+      const separator = field.fieldKey.lastIndexOf('.');
+      if (separator <= 0) {
+        return { state: 'collision', reason: `Malformed V2 fieldKey ${field.fieldKey}` };
+      }
+      const objectKey = field.fieldKey.slice(0, separator);
+      evidence.push({ source: `field.fieldKey:${field.id || 'unknown'}`, value: objectKey });
+      if (field.fieldKey.endsWith('.rr_assignment_id')) primaryFieldSeen = true;
+    }
+  }
+  for (const folder of v2Folders) {
+    if (typeof folder?.objectKey === 'string' && folder.objectKey) {
+      evidence.push({ source: `folder.objectKey:${folder.id || 'unknown'}`, value: folder.objectKey });
+    }
+  }
+  if (!evidence.length || !primaryFieldSeen) return { state: 'unknown' };
+  const invalid = evidence.find((entry) => !allowed.test(entry.value));
+  const keys = [...new Set(evidence.map((entry) => entry.value))];
+  if (invalid || keys.length !== 1) {
     return {
       state: 'collision',
-      reason: 'Server readback returned an incompatible or ambiguous custom-object field prefix'
+      reason: 'Server V2 readback returned incompatible or conflicting objectKey/fieldKey evidence'
     };
   }
-  return { state: 'exact', prefix: prefixes[0] };
+  return {
+    state: 'exact',
+    schemaKey: manifest.customObject.key,
+    writeObjectKey: keys[0],
+    fieldPrefix: `${keys[0]}.`
+  };
 }
 
 async function discoverSchema(client, manifest, receipt) {
@@ -533,14 +616,14 @@ async function discoverSchema(client, manifest, receipt) {
   const objectMatch = findObject(objects, manifest.customObject);
   let customV2 = { fields: [], folders: [] };
   let objectDetails = null;
-  let customFieldPrefix = { state: 'unknown' };
+  let customV2Namespace = { state: 'unknown' };
   if (objectMatch.state === 'exact') {
     customV2 = await readV2Fields(client, manifest, receipt, objectMatch.value.key);
     objectDetails = await readObjectDetails(client, manifest, receipt, objectMatch.value.key);
-    customFieldPrefix = customFieldPrefixFromReadback(
+    customV2Namespace = customObjectV2NamespaceFromReadback(
       manifest,
       customV2.fields,
-      objectDetails
+      customV2.folders
     );
   }
   return {
@@ -552,7 +635,7 @@ async function discoverSchema(client, manifest, receipt) {
     objectMatch,
     customV2,
     objectDetails,
-    customFieldPrefix
+    customV2Namespace
   };
 }
 
@@ -626,12 +709,12 @@ function planSchema(manifest, discovery) {
   });
 
   if (discovery.objectMatch.state === 'exact') {
-    if (discovery.customFieldPrefix.state === 'collision') {
+    if (discovery.customV2Namespace.state === 'collision') {
       plan.blockers.push({
         resource: 'customObjectFieldPrefix',
-        reason: discovery.customFieldPrefix.reason
+        reason: discovery.customV2Namespace.reason
       });
-    } else if (discovery.customFieldPrefix.state !== 'exact') {
+    } else if (discovery.customV2Namespace.state !== 'exact') {
       plan.blockers.push({
         resource: 'customObjectFieldPrefix',
         reason: 'Server readback did not expose a usable custom-object field prefix'
@@ -641,7 +724,7 @@ function planSchema(manifest, discovery) {
       plan,
       findFolder(
         discovery.customV2.folders,
-        discovery.objectMatch.value.key,
+        discovery.customV2Namespace.writeObjectKey,
         manifest.customObject.folder
       ),
       {
@@ -739,26 +822,35 @@ async function ensureLegacyField(client, manifest, receipt, model, name) {
   return result.value;
 }
 
-async function ensureFolder(client, manifest, receipt, objectKey, name) {
-  let current = await readV2Fields(client, manifest, receipt, objectKey);
-  let result = requireNoCollision(findFolder(current.folders, objectKey, name));
+async function ensureFolder(client, manifest, receipt, schemaKey, writeObjectKey, name) {
+  let current = await readV2Fields(client, manifest, receipt, schemaKey);
+  let result = requireNoCollision(findFolder(current.folders, writeObjectKey, name));
   if (result.state === 'exact') return result.value;
   await client.request('POST', '/custom-fields/folder', {
     mutating: true,
-    body: { objectKey, name, locationId: manifest.identity.locationId }
+    body: { objectKey: writeObjectKey, name, locationId: manifest.identity.locationId }
   });
-  recordCompletedCreate(receipt, 'customFieldFolder', `${objectKey}:${name}`, '/custom-fields/folder');
-  current = await readV2Fields(client, manifest, receipt, objectKey);
-  result = requireNoCollision(findFolder(current.folders, objectKey, name));
+  recordCompletedCreate(receipt, 'customFieldFolder', `${writeObjectKey}:${name}`, '/custom-fields/folder');
+  current = await readV2Fields(client, manifest, receipt, schemaKey);
+  result = requireNoCollision(findFolder(current.folders, writeObjectKey, name));
   if (result.state !== 'exact') {
-    throw new GuardError('CREATE_READBACK_FAILED', `Folder ${name} for ${objectKey} was not confirmed`);
+    throw new GuardError('CREATE_READBACK_FAILED', `Folder ${name} for ${writeObjectKey} was not confirmed`);
   }
   return result.value;
 }
 
-async function ensureV2Field(client, manifest, receipt, objectKey, folderId, expected, fieldKey) {
+async function ensureV2Field(
+  client,
+  manifest,
+  receipt,
+  schemaKey,
+  writeObjectKey,
+  folderId,
+  expected,
+  fieldKey
+) {
   const bySuffix = Boolean(expected.suffix);
-  let current = await readV2Fields(client, manifest, receipt, objectKey);
+  let current = await readV2Fields(client, manifest, receipt, schemaKey);
   let result = requireNoCollision(findV2Field(current.fields, expected, { bySuffix }));
   if (result.state === 'exact') return result.value;
   await client.request('POST', '/custom-fields/', {
@@ -770,12 +862,12 @@ async function ensureV2Field(client, manifest, receipt, objectKey, folderId, exp
       ...(expected.options ? { options: expected.options } : {}),
       dataType: expected.dataType,
       fieldKey,
-      objectKey,
+      objectKey: writeObjectKey,
       parentId: folderId
     }
   });
   recordCompletedCreate(receipt, 'customField', fieldKey, '/custom-fields/');
-  current = await readV2Fields(client, manifest, receipt, objectKey);
+  current = await readV2Fields(client, manifest, receipt, schemaKey);
   result = requireNoCollision(findV2Field(current.fields, expected, { bySuffix }));
   if (result.state !== 'exact') {
     throw new GuardError('CREATE_READBACK_FAILED', `V2 field ${expected.name} was not confirmed`);
@@ -783,12 +875,24 @@ async function ensureV2Field(client, manifest, receipt, objectKey, folderId, exp
   return result.value;
 }
 
-async function ensureCustomObject(client, manifest, receipt) {
-  let objects = await readObjects(client, manifest, receipt);
+function exactCreatedCustomObject(object, manifest) {
+  return Boolean(object?.id) &&
+    object.standard === false &&
+    object.locationId === manifest.identity.locationId &&
+    object.key === manifest.customObject.key &&
+    object.labels?.singular === manifest.customObject.labels.singular &&
+    object.labels?.plural === manifest.customObject.labels.plural &&
+    object.description === manifest.customObject.description &&
+    object.primaryDisplayProperty === manifest.customObject.primaryDisplayPropertyDetails.key;
+}
+
+async function ensureCustomObject(agencyClient, locationClient, manifest, receipt) {
+  let objects = await readObjects(locationClient, manifest, receipt);
   let result = requireNoCollision(findObject(objects, manifest.customObject));
   if (result.state === 'exact') return result.value;
-  await client.request('POST', '/objects/', {
+  const response = await agencyClient.request('POST', '/objects/', {
     mutating: true,
+    expectedStatus: 201,
     body: {
       labels: manifest.customObject.labels,
       key: manifest.customObject.key,
@@ -797,26 +901,32 @@ async function ensureCustomObject(client, manifest, receipt) {
       primaryDisplayPropertyDetails: manifest.customObject.primaryDisplayPropertyDetails
     }
   });
+  const created = requireObject(response, ['object', 'data.object'], 'object.create', receipt);
+  if (!exactCreatedCustomObject(created, manifest)) {
+    throw new GuardError(
+      'MALFORMED_OBJECT_CREATE_RESPONSE',
+      'Agency object create response did not exactly match the requested RestoreRadar object'
+    );
+  }
   recordCompletedCreate(receipt, 'customObject', manifest.customObject.key, '/objects/');
-  objects = await readObjects(client, manifest, receipt);
+  objects = await readObjects(locationClient, manifest, receipt);
   result = requireNoCollision(findObject(objects, manifest.customObject));
-  if (result.state !== 'exact') {
+  if (result.state !== 'exact' || result.value?.id !== created.id) {
     throw new GuardError('CREATE_READBACK_FAILED', 'Custom object was not confirmed after create');
   }
   return result.value;
 }
 
-async function resolveCustomObjectFieldPrefix(client, manifest, receipt, objectKey) {
-  const v2 = await readV2Fields(client, manifest, receipt, objectKey);
-  const details = await readObjectDetails(client, manifest, receipt, objectKey);
-  const result = customFieldPrefixFromReadback(manifest, v2.fields, details);
+async function resolveCustomObjectV2Namespace(client, manifest, receipt, schemaKey) {
+  const v2 = await readV2Fields(client, manifest, receipt, schemaKey);
+  const result = customObjectV2NamespaceFromReadback(manifest, v2.fields, v2.folders);
   if (result.state !== 'exact') {
     throw new GuardError(
-      'CUSTOM_OBJECT_PREFIX_NOT_PROVEN',
-      result.reason || 'Server did not expose the custom-object field prefix after readback'
+      'CUSTOM_OBJECT_V2_NAMESPACE_NOT_PROVEN',
+      result.reason || 'Server did not expose a single custom-object V2 write namespace'
     );
   }
-  return result.prefix;
+  return result;
 }
 
 async function ensureAssociation(client, manifest, receipt) {
@@ -836,28 +946,66 @@ async function ensureAssociation(client, manifest, receipt) {
   return result.value;
 }
 
-async function applySchema(client, manifest, receipt) {
+async function applySchema(agencyClient, locationClient, manifest, receipt) {
+  const customObject = await ensureCustomObject(
+    agencyClient,
+    locationClient,
+    manifest,
+    receipt
+  );
+  if (customObject.key !== manifest.customObject.key) {
+    throw new GuardError('CUSTOM_OBJECT_KEY_MISMATCH', 'Server returned an unexpected custom-object key');
+  }
+  const namespace = await resolveCustomObjectV2Namespace(
+    locationClient,
+    manifest,
+    receipt,
+    customObject.key
+  );
+  const customFolder = await ensureFolder(
+    locationClient,
+    manifest,
+    receipt,
+    customObject.key,
+    namespace.writeObjectKey,
+    manifest.customObject.folder
+  );
+  for (const field of manifest.customObject.fields) {
+    await ensureV2Field(
+      locationClient,
+      manifest,
+      receipt,
+      customObject.key,
+      namespace.writeObjectKey,
+      customFolder.id,
+      field,
+      `${namespace.fieldPrefix}${field.suffix}`
+    );
+  }
+
   for (const pipeline of manifest.pipelines) {
-    await ensurePipeline(client, manifest, receipt, pipeline);
+    await ensurePipeline(locationClient, manifest, receipt, pipeline);
   }
   for (const model of ['contact', 'opportunity']) {
     for (const name of manifest.legacyFields[model]) {
-      await ensureLegacyField(client, manifest, receipt, model, name);
+      await ensureLegacyField(locationClient, manifest, receipt, model, name);
     }
   }
 
   const businessFolder = await ensureFolder(
-    client,
+    locationClient,
     manifest,
     receipt,
+    manifest.business.objectKey,
     manifest.business.objectKey,
     manifest.business.folder
   );
   for (const field of manifest.business.fields) {
     await ensureV2Field(
-      client,
+      locationClient,
       manifest,
       receipt,
+      manifest.business.objectKey,
       manifest.business.objectKey,
       businessFolder.id,
       field,
@@ -865,35 +1013,7 @@ async function applySchema(client, manifest, receipt) {
     );
   }
 
-  const customObject = await ensureCustomObject(client, manifest, receipt);
-  if (customObject.key !== manifest.customObject.key) {
-    throw new GuardError('CUSTOM_OBJECT_KEY_MISMATCH', 'Server returned an unexpected custom-object key');
-  }
-  const fieldPrefix = await resolveCustomObjectFieldPrefix(
-    client,
-    manifest,
-    receipt,
-    customObject.key
-  );
-  const customFolder = await ensureFolder(
-    client,
-    manifest,
-    receipt,
-    customObject.key,
-    manifest.customObject.folder
-  );
-  for (const field of manifest.customObject.fields) {
-    await ensureV2Field(
-      client,
-      manifest,
-      receipt,
-      customObject.key,
-      customFolder.id,
-      field,
-      `${fieldPrefix}${field.suffix}`
-    );
-  }
-  await ensureAssociation(client, manifest, receipt);
+  await ensureAssociation(locationClient, manifest, receipt);
 }
 
 function testIds(suffix) {
@@ -1463,8 +1583,15 @@ function createReceipt(manifest, options, nowIso) {
     baseUrl: OFFICIAL_BASE_URL,
     apiVersion: API_VERSION,
     expectedIdentity: { ...manifest.identity },
-    observedIdentity: { companyId: null, locationId: null },
-    credential: { source: null, printed: false, persisted: false },
+    observedIdentity: {
+      agencyCompanyId: null,
+      locationCompanyId: null,
+      locationId: null
+    },
+    credentials: {
+      agency: { source: null, printed: false, persisted: false },
+      location: { source: null, printed: false, persisted: false }
+    },
     summary: { existing: 0, plannedCreates: 0, completedCreates: 0, collisions: 0 },
     actions: [],
     completed: [],
@@ -1508,17 +1635,38 @@ async function runSchemaTool({
   const nowIso = now().toISOString();
   const receipt = createReceipt(manifest, options, nowIso);
   try {
-    const credential = resolveCredential({ env, manifest, keychainReader });
-    receipt.credential.source = credential.source;
-    const client = new HighLevelClient({
-      token: credential.token,
+    const agencyCredential = resolveCredential({
+      env,
+      service: manifest.api.credentials.agency.keychainService,
+      keychainReader
+    });
+    const locationCredential = resolveCredential({
+      env,
+      service: manifest.api.credentials.location.keychainService,
+      keychainReader
+    });
+    receipt.credentials.agency.source = agencyCredential.source;
+    receipt.credentials.location.source = locationCredential.source;
+    const sharedClientOptions = {
       fetchImpl,
       apply: options.apply,
       receipt,
-      locationId: manifest.identity.locationId
+      locationId: manifest.identity.locationId,
+      companyId: manifest.identity.companyId
+    };
+    const agencyClient = new HighLevelClient({
+      ...sharedClientOptions,
+      token: agencyCredential.token,
+      role: 'agency'
     });
-    await verifyIdentity(client, manifest, receipt);
-    const discovery = await discoverSchema(client, manifest, receipt);
+    const locationClient = new HighLevelClient({
+      ...sharedClientOptions,
+      token: locationCredential.token,
+      role: 'location'
+    });
+    await verifyAgencyIdentity(agencyClient, manifest, receipt);
+    await verifyLocationIdentity(locationClient, manifest, receipt);
+    const discovery = await discoverSchema(locationClient, manifest, receipt);
     const plan = planSchema(manifest, discovery);
     receipt.actions = plan.actions;
     receipt.collisions = plan.collisions;
@@ -1540,16 +1688,14 @@ async function runSchemaTool({
       receipt.notProven.push(
         'The v3 custom-object record create documentation exposes an open request body schema; TEST record property-key behavior remains unproven until a controlled apply and exact readback.'
       );
-      if (!options.testSuffix) {
-        receipt.notProven.push(
-          'No TEST verification records were read or written; apply requires an explicit stable UTC test suffix.'
-        );
-      }
+      receipt.notProven.push(
+        'No TEST verification records were read or written in dry-run mode; apply requires an explicit stable UTC test suffix.'
+      );
       return { receipt, exitCode: 0 };
     }
 
-    await applySchema(client, manifest, receipt);
-    const finalDiscovery = await discoverSchema(client, manifest, receipt);
+    await applySchema(agencyClient, locationClient, manifest, receipt);
+    const finalDiscovery = await discoverSchema(locationClient, manifest, receipt);
     const finalPlan = planSchema(manifest, finalDiscovery);
     if (
       finalPlan.collisions.length ||
@@ -1558,7 +1704,13 @@ async function runSchemaTool({
     ) {
       throw new GuardError('FINAL_SCHEMA_NOT_EXACT', 'Post-create readback did not match the exact manifest');
     }
-    await applyTestRecords(client, manifest, receipt, options.testSuffix, nowIso);
+    await applyTestRecords(
+      locationClient,
+      manifest,
+      receipt,
+      options.testSuffix,
+      timestampFromTestSuffix(options.testSuffix)
+    );
     receipt.verdict = 'APPLIED';
     receipt.notProven = [];
     receipt.summary.existing = finalPlan.existing;
@@ -1604,7 +1756,7 @@ module.exports = {
   buildContactPayloads,
   buildOpportunityPayloads,
   createReceipt,
-  customFieldPrefixFromReadback,
+  customObjectV2NamespaceFromReadback,
   discoverSchema,
   helpText,
   loadManifest,
@@ -1612,5 +1764,6 @@ module.exports = {
   planSchema,
   resolveCredential,
   runSchemaTool,
-  testIds
+  testIds,
+  timestampFromTestSuffix
 };

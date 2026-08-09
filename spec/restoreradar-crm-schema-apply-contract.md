@@ -13,7 +13,15 @@ Apply requires all three explicit confirmations:
 
 The stable suffix makes the TEST record names and external IDs repeatable. A
 rerun reads and validates the exact TEST resources before deciding whether a
-create is necessary.
+create is necessary. Verification timestamps are derived from that suffix, not
+the wall clock, so the same suffix remains identical across later retries.
+
+Two credentials are independently required: `GHL_AGENCY_API_KEY` for the
+agency company preflight and custom-object schema create, and
+`GHL_RESTORERADAR_API_KEY` for the RestoreRadar location preflight plus every
+location read/create. Both identities and all discovery reads must succeed
+before the first POST. The custom-object schema POST is deliberately first so
+an agency-scope failure cannot follow a batch of location creates.
 
 ## Create-only surface
 
@@ -50,9 +58,17 @@ header.
 The Objects API documents plural keys such as `custom_objects.pet`. The Custom
 Fields V2 create page still illustrates field keys with the singular prefix
 `custom_object.pet.name`, while its read endpoint requires the plural object
-key. The tool never selects either prefix from documentation alone. It reads
-back the automatically created primary display field and uses only the single
-server-returned prefix; missing or conflicting prefixes halt the run.
+key. The tool always reads the schema/V2 endpoint with the plural schema key,
+then reconciles every V2 `objectKey`, `fieldKey`, and folder `objectKey` into one
+server-returned write namespace. Folder/field POSTs use only that resolved
+namespace; missing or conflicting evidence halts the run.
+
+The agency credential may call only company identity GET and custom-object
+schema POST. The location credential handles all other reads and creates.
+Protocol-relative paths, alternate origins, cross-company/location payloads,
+and role-crossing endpoints are rejected before network dispatch. A successful
+object schema create must be HTTP 201 with the exact server object ID, location,
+key, labels, description, and primary property before any later POST can run.
 
 The v3 create-record page currently exposes an open request-body schema. The
 tool uses the documented `properties` record shape, creates only TEST-marked
