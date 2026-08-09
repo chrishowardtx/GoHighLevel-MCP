@@ -1,1 +1,1 @@
-handoff/2026-08-09T091728Z__codex__ghl-mcp-hardening.md
+handoff/2026-08-09T140537Z__codex__highlevel-phase1-closeout.md
