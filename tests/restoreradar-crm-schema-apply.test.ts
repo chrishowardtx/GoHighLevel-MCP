@@ -298,6 +298,15 @@ function completeRouter(call: FetchCall, overrides: {
   directObjectContractMismatch?: boolean;
   v2EnvironmentOptionMismatch?: 'key' | 'label';
   primaryFieldIssue?: 'missing-id' | 'wrong-name' | 'wrong-type' | 'wrong-key';
+  assignmentSearchScenario?:
+    | 'duplicate'
+    | 'truncated'
+    | 'missing-total'
+    | 'conflicting-total'
+    | 'non-integer-total'
+    | 'negative-total'
+    | 'repeated-id'
+    | 'missing-id';
   missingId?:
     | 'pipeline'
     | 'legacy-field'
@@ -598,12 +607,40 @@ function completeRouter(call: FetchCall, overrides: {
     if (overrides.unsafeRecord === 'assignment-false') {
       properties.unexpected_false = false;
     }
-    return jsonResponse({
-      records: [{
-        id: 'assignment_test',
-        properties
-      }]
-    });
+    const exactRecord = {
+      id: overrides.assignmentSearchScenario === 'missing-id' ? undefined : 'assignment_test',
+      properties
+    };
+    const query = call.body.query;
+    const records = query === ids.assignmentExternalId || query === ''
+      ? [exactRecord]
+      : [];
+    if (
+      ['duplicate', 'repeated-id'].includes(overrides.assignmentSearchScenario || '') &&
+      records.length
+    ) {
+      records.push({
+        id: overrides.assignmentSearchScenario === 'repeated-id'
+          ? 'assignment_test'
+          : 'assignment_test_duplicate',
+        properties: JSON.parse(JSON.stringify(properties))
+      });
+    }
+    if (overrides.assignmentSearchScenario === 'missing-total') {
+      return jsonResponse({ records });
+    }
+    if (overrides.assignmentSearchScenario === 'conflicting-total') {
+      return jsonResponse({
+        records,
+        total: records.length,
+        data: { total: records.length + 1 }
+      });
+    }
+    let total = records.length;
+    if (overrides.assignmentSearchScenario === 'truncated') total = records.length + 1;
+    if (overrides.assignmentSearchScenario === 'non-integer-total') total = records.length + 0.5;
+    if (overrides.assignmentSearchScenario === 'negative-total') total = -1;
+    return jsonResponse({ records, total });
   }
   if (
     call.method === 'GET' &&
@@ -654,6 +691,7 @@ function statefulMissingSchemaServer(objectReadDelay = 0, options: {
     businesses: [],
     opportunities: [],
     assignments: [],
+    assignmentSearchTotalOverride: null,
     relations: [],
     relationScenario: options.relationScenario || 'exact',
     writeLog: []
@@ -883,7 +921,16 @@ function statefulMissingSchemaServer(objectReadDelay = 0, options: {
       call.method === 'POST' &&
       pathname === `/objects/${manifest.customObject.key}/records/search`
     ) {
-      return jsonResponse({ records: state.assignments });
+      const query = call.body.query;
+      const records = query === ''
+        ? [...state.assignments]
+        : state.assignments.filter((record: any) =>
+          record?.properties?.rr_assignment_id === query
+        );
+      return jsonResponse({
+        records,
+        total: state.assignmentSearchTotalOverride ?? records.length
+      });
     }
     if (
       call.method === 'POST' &&
@@ -1210,7 +1257,7 @@ describe('RestoreRadar guarded CRM schema apply tool', () => {
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
-  test('apply is idempotent when exact schema and stable TEST records already exist', async () => {
+  test('plain stable assignment ID recovers the exact live record where the legacy field query misses', async () => {
     const { calls, fetchImpl } = mockFetch(completeRouter);
     const result = await runSchemaTool({
       argv: requiredArgs(['--apply', '--test-suffix', TEST_SUFFIX]),
@@ -1231,6 +1278,19 @@ describe('RestoreRadar guarded CRM schema apply tool', () => {
     );
     expect(mutationCalls).toEqual([]);
     expect(result.receipt.summary.completedCreates).toBe(0);
+    const assignmentSearches = calls.filter((call) =>
+      call.method === 'POST' &&
+      call.url.pathname === `/objects/${loadManifest().customObject.key}/records/search`
+    );
+    expect(assignmentSearches).toHaveLength(1);
+    expect(assignmentSearches[0].body).toEqual({
+      locationId: loadManifest().identity.locationId,
+      page: 1,
+      pageLimit: 100,
+      query: testIds(TEST_SUFFIX).assignmentExternalId,
+      searchAfter: []
+    });
+    expect(assignmentSearches[0].body.query).not.toContain('rr_assignment_id:');
   });
 
   test('same stable suffix replays with zero writes even when the wall clock changes', async () => {
@@ -1260,6 +1320,49 @@ describe('RestoreRadar guarded CRM schema apply tool', () => {
     expect(firstResult.receipt.verdict).toBe('APPLIED');
     expect(secondResult.receipt.verdict).toBe('APPLIED');
     expect(timestampFromTestSuffix(TEST_SUFFIX)).toBe(NOW.toISOString());
+    for (const run of [first, second]) {
+      const assignmentSearch = run.calls.find((call) =>
+        call.method === 'POST' &&
+        call.url.pathname === `/objects/${loadManifest().customObject.key}/records/search`
+      );
+      expect(assignmentSearch?.body.query).toBe(testIds(TEST_SUFFIX).assignmentExternalId);
+      expect(assignmentSearch?.body.pageLimit).toBe(100);
+    }
+  });
+
+  test.each([
+    ['duplicate', 'INCOMPATIBLE_COLLISION'],
+    ['truncated', 'OBJECT_RECORD_SEARCH_INCOMPLETE'],
+    ['missing-total', 'OBJECT_RECORD_SEARCH_TOTAL_INVALID'],
+    ['conflicting-total', 'OBJECT_RECORD_SEARCH_TOTAL_INVALID'],
+    ['non-integer-total', 'OBJECT_RECORD_SEARCH_TOTAL_INVALID'],
+    ['negative-total', 'OBJECT_RECORD_SEARCH_TOTAL_INVALID'],
+    ['repeated-id', 'INCOMPATIBLE_COLLISION'],
+    ['missing-id', 'INCOMPATIBLE_COLLISION']
+  ])('halts assignment %s search before any mutation', async (
+    assignmentSearchScenario: any,
+    expectedCode: string
+  ) => {
+    const { calls, fetchImpl } = mockFetch((call) => completeRouter(call, {
+      assignmentSearchScenario
+    }));
+    const result = await runSchemaTool({
+      argv: requiredArgs(['--apply', '--test-suffix', TEST_SUFFIX]),
+      fetchImpl,
+      env: credentialEnv(),
+      now: () => NOW
+    });
+    const semanticReadPosts = [
+      '/contacts/search',
+      `/objects/${loadManifest().customObject.key}/records/search`
+    ];
+
+    expect(result.exitCode).toBe(2);
+    expect(result.receipt.verdict).toBe('HALTED');
+    expect(result.receipt.haltReason.code).toBe(expectedCode);
+    expect(calls.filter((call) =>
+      call.method === 'POST' && !semanticReadPosts.includes(call.url.pathname)
+    )).toEqual([]);
   });
 
   test('halts on an incompatible namespaced collision without writing', async () => {
@@ -2496,6 +2599,14 @@ describe('RestoreRadar guarded CRM schema apply tool', () => {
       !call.url.pathname.endsWith('/records/search')
     );
     expect(secondMutationPosts).toEqual([]);
+    const replayAssignmentSearch = second.calls.find((call) =>
+      call.method === 'POST' &&
+      call.url.pathname === `/objects/${server.manifest.customObject.key}/records/search`
+    );
+    expect(replayAssignmentSearch?.body).toMatchObject({
+      query: ids.assignmentExternalId,
+      pageLimit: 100
+    });
     expect(second.calls.filter((call) =>
       call.method === 'GET' && call.url.pathname.startsWith('/associations/relations/')
     ).map((call) => call.url.pathname)).toEqual([
