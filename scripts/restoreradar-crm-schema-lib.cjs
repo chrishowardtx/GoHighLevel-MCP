@@ -1420,6 +1420,7 @@ async function ensureTestContact(client, manifest, receipt, name, payload) {
   const created = requireCreatedResource(
     await client.request('POST', '/contacts/', {
       mutating: true,
+      expectedStatus: 201,
       receiptResource: 'testContact',
       receiptKey: name,
       body: payload
@@ -1538,6 +1539,7 @@ async function ensureTestBusiness(client, manifest, receipt, name, payload) {
   const created = requireCreatedResource(
     await client.request('POST', '/objects/business/records', {
       mutating: true,
+      expectedStatus: 201,
       receiptResource: 'testBusiness',
       receiptKey: name,
       body: payload
@@ -1606,6 +1608,7 @@ async function ensureTestOpportunity(client, manifest, receipt, name, payload) {
   const created = requireCreatedResource(
     await client.request('POST', '/opportunities/', {
       mutating: true,
+      expectedStatus: 201,
       receiptResource: 'testOpportunity',
       receiptKey: name,
       body: payload
@@ -1671,6 +1674,7 @@ async function ensureTestAssignment(client, manifest, receipt, externalId, paylo
     `/objects/${encodeURIComponent(manifest.customObject.key)}/records`,
     {
       mutating: true,
+      expectedStatus: 201,
       receiptResource: 'testAssignment',
       receiptKey: externalId,
       body: payload
@@ -1720,11 +1724,12 @@ async function ensureTestRelation(client, manifest, receipt, association, homeow
   const created = requireCreatedResource(
     await client.request('POST', '/associations/relations', {
       mutating: true,
+      expectedStatus: 201,
       receiptResource: 'testRelation',
       receiptKey: `${homeownerId}:${assignmentId}`,
       body
     }),
-    ['relation', 'data.relation'],
+    ['relation', 'data.relation', '$'],
     'TEST relation',
     receipt
   );
@@ -1981,6 +1986,10 @@ async function runSchemaTool({
     receipt.actions = finalPlan.actions;
     receipt.collisions = finalPlan.collisions;
     receipt.blockers = finalPlan.blockers;
+    receipt.notProven = finalPlan.notProven;
+    receipt.summary.existing = finalPlan.existing;
+    receipt.summary.plannedCreates = finalPlan.plannedCreates;
+    receipt.summary.collisions = finalPlan.collisions.length;
     receipt.testVerification.recordsRead = true;
     await applyTestRecords(
       locationClient,

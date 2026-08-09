@@ -40,6 +40,29 @@ const DOCUMENTED_CREATE_FAMILIES: Array<{
   { family: 'association', path: '/associations/', status: 201 }
 ];
 
+type TestCreateFamily =
+  | 'test-contact'
+  | 'test-business'
+  | 'test-opportunity'
+  | 'test-assignment'
+  | 'test-relation';
+
+const TEST_CREATE_FAMILIES: Array<{
+  family: TestCreateFamily;
+  path: string;
+  resource: string;
+}> = [
+  { family: 'test-contact', path: '/contacts/', resource: 'testContact' },
+  { family: 'test-business', path: '/objects/business/records', resource: 'testBusiness' },
+  { family: 'test-opportunity', path: '/opportunities/', resource: 'testOpportunity' },
+  {
+    family: 'test-assignment',
+    path: `/objects/${loadManifest().customObject.key}/records`,
+    resource: 'testAssignment'
+  },
+  { family: 'test-relation', path: '/associations/relations', resource: 'testRelation' }
+];
+
 const NOW = new Date('2026-08-09T12:34:56.000Z');
 const TEST_SUFFIX = '20260809T123456Z';
 const TOKEN = 'test_secret_token_value';
@@ -525,7 +548,7 @@ function completeRouter(call: FetchCall, overrides: {
 function statefulMissingSchemaServer(objectReadDelay = 0, options: {
   envelope?: 'flat' | 'wrapper';
   failure?: {
-    family: DocumentedCreateFamily | 'test-assignment';
+    family: DocumentedCreateFamily | TestCreateFamily;
     kind: 'wrong-status' | 'missing-id' | 'id-mismatch';
   };
 } = {}) {
@@ -694,7 +717,7 @@ function statefulMissingSchemaServer(objectReadDelay = 0, options: {
     if (call.method === 'POST' && pathname === '/contacts/') {
       const contact = { ...call.body, id: nextId('contact') };
       state.contacts.push(contact);
-      return jsonResponse({ contact }, 201);
+      return createResponse('test-contact', 'contact', contact, 201);
     }
     if (call.method === 'GET' && pathname.startsWith('/contacts/')) {
       const id = pathname.split('/').pop();
@@ -714,7 +737,7 @@ function statefulMissingSchemaServer(objectReadDelay = 0, options: {
     if (call.method === 'POST' && pathname === '/objects/business/records') {
       const record = { ...call.body, id: nextId('business') };
       state.businesses.push(record);
-      return jsonResponse({ record }, 201);
+      return createResponse('test-business', 'record', record, 201);
     }
     if (call.method === 'GET' && pathname.startsWith('/objects/business/records/')) {
       const id = pathname.split('/').pop();
@@ -733,7 +756,7 @@ function statefulMissingSchemaServer(objectReadDelay = 0, options: {
     if (call.method === 'POST' && pathname === '/opportunities/') {
       const opportunity = { ...call.body, id: nextId('opportunity') };
       state.opportunities.push(opportunity);
-      return jsonResponse({ opportunity }, 201);
+      return createResponse('test-opportunity', 'opportunity', opportunity, 201);
     }
     if (call.method === 'GET' && /^\/opportunities\/[^/]+$/.test(pathname)) {
       const id = pathname.split('/').pop();
@@ -773,7 +796,7 @@ function statefulMissingSchemaServer(objectReadDelay = 0, options: {
     if (call.method === 'POST' && pathname === '/associations/relations') {
       const relation = { ...call.body, id: nextId('relation') };
       state.relations.push(relation);
-      return jsonResponse({ relation }, 201);
+      return createResponse('test-relation', 'relation', relation, 201, true);
     }
     throw new Error(`Unexpected request in stateful fixture: ${call.method} ${pathname}`);
   };
@@ -1377,7 +1400,12 @@ describe('RestoreRadar guarded CRM schema apply tool', () => {
     expect(firstResult.receipt.responseShapes).toEqual(expect.arrayContaining([
       { resource: 'pipeline.create', path: '$' },
       { resource: 'custom field folder.create', path: '$' },
-      { resource: 'association.create', path: '$' }
+      { resource: 'association.create', path: '$' },
+      { resource: 'TEST contact.create', path: 'contact' },
+      { resource: 'TEST business.create', path: 'record' },
+      { resource: 'TEST opportunity.create', path: 'opportunity' },
+      { resource: 'TEST assignment.create', path: 'record' },
+      { resource: 'TEST relation.create', path: '$' }
     ]));
     expect(firstResult.receipt.actions.every((action: any) => action.status === 'exists')).toBe(true);
     expect(server.state.pipelines).toHaveLength(2);
@@ -1438,7 +1466,7 @@ describe('RestoreRadar guarded CRM schema apply tool', () => {
     expect(server.state.writeLog).toHaveLength(75);
   });
 
-  test('retains compatibility with wrapped pipeline, folder, and association create envelopes', async () => {
+  test('retains compatibility with wrapped pipeline, folder, association, and relation create envelopes', async () => {
     const server = statefulMissingSchemaServer(0, { envelope: 'wrapper' });
     const { fetchImpl } = mockFetch(server.router);
     const result = await runSchemaTool({
@@ -1453,7 +1481,8 @@ describe('RestoreRadar guarded CRM schema apply tool', () => {
     expect(result.receipt.responseShapes).toEqual(expect.arrayContaining([
       { resource: 'pipeline.create', path: 'pipeline' },
       { resource: 'custom field folder.create', path: 'folder' },
-      { resource: 'association.create', path: 'association' }
+      { resource: 'association.create', path: 'association' },
+      { resource: 'TEST relation.create', path: 'relation' }
     ]));
   });
 
@@ -1543,6 +1572,76 @@ describe('RestoreRadar guarded CRM schema apply tool', () => {
     }
   );
 
+  test.each(TEST_CREATE_FAMILIES)(
+    'pins $family to HTTP 201 and records its one accepted wrong-status POST without verifying it',
+    async ({ family, path, resource }) => {
+      const server = statefulMissingSchemaServer(0, {
+        failure: { family, kind: 'wrong-status' }
+      });
+      const { calls, fetchImpl } = mockFetch(server.router);
+      const result = await runSchemaTool({
+        argv: requiredArgs(['--apply', '--test-suffix', TEST_SUFFIX]),
+        fetchImpl,
+        env: credentialEnv(),
+        now: () => NOW
+      });
+      const targetPosts = calls.filter((call) =>
+        call.method === 'POST' && call.url.pathname === path
+      );
+      const targetRequests = result.receipt.requests.filter((request: any) =>
+        request.method === 'POST' && request.path === path
+      );
+      const accepted = result.receipt.acceptedCreates.filter((entry: any) => entry.path === path);
+      expect(result.receipt.haltReason.code).toBe('UNEXPECTED_SUCCESS_STATUS');
+      expect(targetPosts).toHaveLength(1);
+      expect(targetRequests).toEqual([
+        expect.objectContaining({ status: 200, accepted2xx: true })
+      ]);
+      expect(accepted).toEqual([
+        expect.objectContaining({ status: 200, resource })
+      ]);
+      expect(result.receipt.completed.some((entry: any) => entry.path === path)).toBe(false);
+      expect(result.receipt.summary.acceptedCreates).toBe(result.receipt.acceptedCreates.length);
+      expect(result.receipt.summary.completedCreates).toBe(result.receipt.completed.length);
+      expect(result.receipt.acceptedCreates.length).toBe(result.receipt.completed.length + 1);
+    }
+  );
+
+  test.each([
+    { kind: 'missing-id', code: 'CREATE_RESPONSE_ID_MISSING' },
+    { kind: 'id-mismatch', code: 'CREATE_RESPONSE_ID_MISMATCH' }
+  ])(
+    'halts after one documented-flat relation POST on $kind and keeps acceptance separate from verification',
+    async ({ kind, code }) => {
+      const server = statefulMissingSchemaServer(0, {
+        failure: { family: 'test-relation', kind: kind as 'missing-id' | 'id-mismatch' }
+      });
+      const { calls, fetchImpl } = mockFetch(server.router);
+      const result = await runSchemaTool({
+        argv: requiredArgs(['--apply', '--test-suffix', TEST_SUFFIX]),
+        fetchImpl,
+        env: credentialEnv(),
+        now: () => NOW
+      });
+      const relationPosts = calls.filter((call) =>
+        call.method === 'POST' && call.url.pathname === '/associations/relations'
+      );
+      expect(result.receipt.haltReason.code).toBe(code);
+      expect(relationPosts).toHaveLength(1);
+      expect(result.receipt.acceptedCreates.at(-1)).toEqual(expect.objectContaining({
+        resource: 'testRelation',
+        path: '/associations/relations',
+        status: 201
+      }));
+      expect(result.receipt.completed.some((entry: any) => entry.resource === 'testRelation')).toBe(false);
+      expect(result.receipt.acceptedCreates).toHaveLength(75);
+      expect(result.receipt.completed).toHaveLength(74);
+      expect(result.receipt.responseShapes).toEqual(expect.arrayContaining([
+        { resource: 'TEST relation.create', path: '$' }
+      ]));
+    }
+  );
+
   test('reports an accepted partial TEST graph separately from readback-verified creates', async () => {
     const server = statefulMissingSchemaServer(0, {
       failure: { family: 'test-assignment', kind: 'missing-id' }
@@ -1560,6 +1659,13 @@ describe('RestoreRadar guarded CRM schema apply tool', () => {
     expect(result.receipt.completed).toHaveLength(73);
     expect(result.receipt.summary.acceptedCreates).toBe(74);
     expect(result.receipt.summary.completedCreates).toBe(73);
+    expect(result.receipt.actions.every((action: any) => action.status === 'exists')).toBe(true);
+    expect(result.receipt.summary.existing).toBe(result.receipt.actions.length);
+    expect(result.receipt.summary.plannedCreates).toBe(0);
+    expect(result.receipt.summary.collisions).toBe(0);
+    expect(result.receipt.collisions).toEqual([]);
+    expect(result.receipt.blockers).toEqual([]);
+    expect(result.receipt.notProven).toEqual([]);
     expect(result.receipt.testVerification).toMatchObject({
       recordsRead: true,
       recordsWritten: true

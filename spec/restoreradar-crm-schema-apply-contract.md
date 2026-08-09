@@ -65,6 +65,15 @@ evaluated before the flat `$` fallback so a wrapper cannot be mistaken for the
 created resource itself. Any other success status, unknown envelope, missing
 server ID, or create/readback ID mismatch halts without retrying the POST.
 
+Every TEST create is also pinned to HTTP 201: Contact, Opportunity, Business
+object record, RR Lead Assignment custom-object record, and association
+relation. Contact keeps the `contact`/`data.contact` envelopes, Opportunity
+keeps `opportunity`/`data.opportunity`, and both object-record families keep
+`record`/`data.record`; those families do not accept an undocumented flat
+fallback. Relation create accepts the documented flat relation object, while
+retaining `relation`/`data.relation` wrapper compatibility in wrapper-first
+order. A different 2xx status is still recorded as accepted and then halts.
+
 ## Fail-closed ambiguities
 
 The Objects API documents plural keys such as `custom_objects.pet`. The Custom
@@ -142,3 +151,9 @@ accepted mutation without overstating how many resources were verified. The
 summary carries separate `acceptedCreates` and `completedCreates` counts, and
 `testVerification.recordsWritten` becomes true as soon as a TEST create is
 accepted.
+
+Once the final schema readback is exact, the receipt replaces the preliminary
+plan and its summary before any TEST write begins. A later partial TEST halt
+therefore retains all schema actions as existing, zero planned creates, zero
+collisions/blockers, and only the final schema `notProven` state; it never
+leaves the pre-create counts or deferred-prefix note behind.
