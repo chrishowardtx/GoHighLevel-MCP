@@ -305,6 +305,8 @@ function completeRouter(call: FetchCall, overrides: {
     | 'v2-field';
   unsafeRecord?:
     | 'contact'
+    | 'contact-conflicting-alias'
+    | 'contact-unknown-value-alias'
     | 'contact-extra-tag'
     | 'contact-false'
     | 'opportunity'
@@ -464,18 +466,27 @@ function completeRouter(call: FetchCall, overrides: {
   if (call.method === 'GET' && pathname === '/contacts/contact_homeowner') {
     const contact: any = { id: 'contact_homeowner', ...contactPayloads.homeowner };
     contact.customFields = [
-      ...contact.customFields,
-      { id: 'empty_contact_placeholder', fieldValue: '' }
+      ...contact.customFields.map((field: any) => ({
+        id: field.id,
+        value: field.fieldValue
+      })),
+      { id: 'empty_contact_placeholder', value: '' }
     ];
     if (overrides.unsafeRecord === 'contact') {
       contact.customFields = [
         ...contact.customFields,
-        { id: 'unexpected_contact_field', fieldValue: 'UNEXPECTED_NONEMPTY' }
+        { id: 'unexpected_contact_field', value: 'UNEXPECTED_NONEMPTY' }
       ];
+    }
+    if (overrides.unsafeRecord === 'contact-conflicting-alias') {
+      contact.customFields[0].fieldValue = 'CONFLICTING_NONEMPTY';
+    }
+    if (overrides.unsafeRecord === 'contact-unknown-value-alias') {
+      contact.customFields.push({ id: 'unexpected_contact_alias', rawValue: 'UNSAFE' });
     }
     if (overrides.unsafeRecord === 'contact-extra-tag') contact.tags.push('unexpected-tag');
     if (overrides.unsafeRecord === 'contact-false') {
-      contact.customFields.push({ id: 'unexpected_contact_false', fieldValue: false });
+      contact.customFields.push({ id: 'unexpected_contact_false', value: false });
     }
     return jsonResponse({ contact });
   }
@@ -485,8 +496,11 @@ function completeRouter(call: FetchCall, overrides: {
         id: 'contact_provider',
         ...contactPayloads.provider,
         customFields: [
-          ...contactPayloads.provider.customFields,
-          { id: 'empty_contact_placeholder', fieldValue: '' }
+          ...contactPayloads.provider.customFields.map((field: any) => ({
+            id: field.id,
+            field_value: field.fieldValue
+          })),
+          { id: 'empty_contact_placeholder', field_value: '' }
         ]
       }
     });
@@ -792,7 +806,18 @@ function statefulMissingSchemaServer(objectReadDelay = 0, options: {
     if (call.method === 'GET' && pathname.startsWith('/contacts/')) {
       const id = pathname.split('/').pop();
       const contact = state.contacts.find((entry: any) => entry.id === id);
-      return contact ? jsonResponse({ contact }) : jsonResponse({}, 404);
+      return contact
+        ? jsonResponse({
+          contact: {
+            ...contact,
+            customFields: contact.customFields.map((field: any) =>
+              contact.name.includes('Provider')
+                ? { id: field.id, field_value: field.fieldValue }
+                : { id: field.id, value: field.fieldValue }
+            )
+          }
+        })
+        : jsonResponse({}, 404);
     }
     if (call.method === 'GET' && pathname === '/businesses/') {
       return jsonResponse({
@@ -1024,6 +1049,21 @@ function seedLiveAcceptedHomeownerPipelineState(
       showInFunnel: true
     }))
   }];
+}
+
+function seedCompleteSchemaState(
+  server: ReturnType<typeof statefulMissingSchemaServer>
+) {
+  const fixture = completeFixture();
+  const { state } = server;
+  state.pipelines = fixture.pipelines;
+  state.legacyFields = fixture.legacyFields;
+  state.businessFolders = [fixture.builtInBusinessFolder, fixture.businessFolder];
+  state.businessFields = fixture.businessFields;
+  state.object = fixture.object;
+  state.customFolders = [fixture.customFolder];
+  state.customFields = fixture.customFields;
+  state.associations = [fixture.association];
 }
 
 describe('RestoreRadar guarded CRM schema apply tool', () => {
@@ -1348,6 +1388,8 @@ describe('RestoreRadar guarded CRM schema apply tool', () => {
 
   test.each([
     'contact',
+    'contact-conflicting-alias',
+    'contact-unknown-value-alias',
     'contact-extra-tag',
     'contact-false',
     'opportunity',
@@ -1784,6 +1826,158 @@ describe('RestoreRadar guarded CRM schema apply tool', () => {
     expect(JSON.stringify(result.receipt)).not.toContain(AGENCY_TOKEN);
   });
 
+  test('captures only bounded redacted allowlisted diagnostics from a rejected TEST contact create', async () => {
+    const server = statefulMissingSchemaServer();
+    seedCompleteSchemaState(server);
+    const leakedEmail = 'homeowner@example.test';
+    const leakedPhone = '+1 (512) 555-0199';
+    const requestEchoMarker = 'REQUEST_ECHO_MUST_NOT_ENTER_RECEIPT';
+    const headersEchoMarker = 'HEADERS_ECHO_MUST_NOT_ENTER_RECEIPT';
+    const bodyEchoMarker = 'BODY_ECHO_MUST_NOT_ENTER_RECEIPT';
+    const ids = testIds(TEST_SUFFIX);
+    const { calls, fetchImpl } = mockFetch((call) => {
+      if (call.method === 'POST' && call.url.pathname === '/contacts/') {
+        return jsonResponse({
+          statusCode: 400,
+          error: `Bad Request for ${leakedEmail}`,
+          message: [
+            `Invalid ${TOKEN} for ${ids.homeownerName}`,
+            `Contact ${leakedEmail} at ${leakedPhone}`,
+            'x'.repeat(700),
+            ...Array.from({ length: 9 }, (_, index) => `diagnostic-${index}`)
+          ],
+          request: { marker: requestEchoMarker },
+          headers: { marker: headersEchoMarker, authorization: `Bearer ${TOKEN}` },
+          body: { marker: bodyEchoMarker, contact: call.body }
+        }, 400);
+      }
+      return server.router(call);
+    });
+    const result = await runSchemaTool({
+      argv: requiredArgs(['--apply', '--test-suffix', TEST_SUFFIX]),
+      fetchImpl,
+      env: credentialEnv(),
+      now: () => NOW
+    });
+    const receiptText = JSON.stringify(result.receipt);
+    const contactPosts = calls.filter((call) =>
+      call.method === 'POST' && call.url.pathname === '/contacts/'
+    );
+
+    expect(result.exitCode).toBe(2);
+    expect(result.receipt.verdict).toBe('HALTED');
+    expect(result.receipt.haltReason).toMatchObject({
+      code: 'API_ERROR',
+      apiResponse: {
+        statusCode: 400,
+        error: 'Bad Request for [REDACTED_EMAIL]'
+      }
+    });
+    expect(Object.keys(result.receipt.haltReason.apiResponse).sort()).toEqual([
+      'error',
+      'message',
+      'statusCode'
+    ]);
+    expect(result.receipt.haltReason.apiResponse.message).toHaveLength(8);
+    expect(result.receipt.haltReason.apiResponse.message.every((message: string) =>
+      message.length <= 500
+    )).toBe(true);
+    expect(result.receipt.haltReason.apiResponse.message[0]).toBe(
+      'Invalid [REDACTED] for [REDACTED]'
+    );
+    expect(result.receipt.haltReason.apiResponse.message[1]).toBe(
+      'Contact [REDACTED_EMAIL] at [REDACTED_PHONE]'
+    );
+    expect(contactPosts).toHaveLength(1);
+    expect(contactPosts[0].body.dnd).toBe(true);
+    expect(contactPosts[0].body).not.toHaveProperty('email');
+    expect(contactPosts[0].body).not.toHaveProperty('phone');
+    expect(result.receipt.acceptedCreates).toEqual([]);
+    expect(result.receipt.completed).toEqual([]);
+    expect(receiptText).not.toContain(TOKEN);
+    expect(receiptText).not.toContain(AGENCY_TOKEN);
+    expect(receiptText).not.toContain(leakedEmail);
+    expect(receiptText).not.toContain(leakedPhone);
+    expect(receiptText).not.toContain(ids.homeownerName);
+    expect(receiptText).not.toContain(requestEchoMarker);
+    expect(receiptText).not.toContain(headersEchoMarker);
+    expect(receiptText).not.toContain(bodyEchoMarker);
+  });
+
+  test('redacts short string, numeric, and boolean request scalars from API diagnostics', async () => {
+    const manifest = loadManifest();
+    const receipt = createReceipt(manifest, { apply: true }, NOW.toISOString());
+    const fetchImpl = jest.fn(async () => jsonResponse({
+      statusCode: 400,
+      error: 'Bad Request',
+      message: 'TX|7|true|q|diagnostic'
+    }, 400));
+    const client = new HighLevelClient({
+      token: TOKEN,
+      fetchImpl,
+      apply: true,
+      receipt,
+      locationId: manifest.identity.locationId,
+      companyId: manifest.identity.companyId,
+      role: 'location'
+    });
+
+    const error = await client.request('POST', '/contacts/', {
+      mutating: true,
+      body: {
+        locationId: manifest.identity.locationId,
+        name: 'RR TEST scalar diagnostic',
+        dnd: true,
+        source: 'TX',
+        numericMarker: 7,
+        tinyMarker: 'q'
+      }
+    }).catch((caught) => caught);
+
+    expect(error).toMatchObject({
+      code: 'API_ERROR',
+      apiResponse: {
+        statusCode: 400,
+        error: 'Bad Request',
+        message: '[REDACTED]|[REDACTED]|[REDACTED]|[REDACTED]|diagnostic'
+      }
+    });
+    expect(JSON.stringify(error.apiResponse)).not.toMatch(/TX|true|\|7\||\|q\|/);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  test('omits diagnostics when the API error body exceeds the fixed response bound', async () => {
+    const manifest = loadManifest();
+    const receipt = createReceipt(manifest, { apply: true }, NOW.toISOString());
+    const fetchImpl = jest.fn(async () => jsonResponse({
+      statusCode: 400,
+      message: 'x'.repeat(17_000)
+    }, 400));
+    const client = new HighLevelClient({
+      token: TOKEN,
+      fetchImpl,
+      apply: true,
+      receipt,
+      locationId: manifest.identity.locationId,
+      companyId: manifest.identity.companyId,
+      role: 'location'
+    });
+
+    await expect(client.request('POST', '/contacts/', {
+      mutating: true,
+      body: {
+        locationId: manifest.identity.locationId,
+        name: 'RR TEST bounded diagnostic',
+        dnd: true
+      }
+    })).rejects.toMatchObject({
+      code: 'API_ERROR',
+      apiResponse: null
+    });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(receipt)).not.toContain('x'.repeat(100));
+  });
+
   test('object create accepted but permanently unverified makes one POST then read-only retries', async () => {
     const server = statefulMissingSchemaServer(99);
     const { calls, fetchImpl } = mockFetch(server.router);
@@ -2202,6 +2396,85 @@ describe('RestoreRadar guarded CRM schema apply tool', () => {
       `/associations/relations/${assignment.id}`
     ]);
     expect(server.state.writeLog).toHaveLength(75);
+  });
+
+  test('a fully-existing 68-resource schema creates no-channel TEST contacts with the documented request shape, then replays with zero writes', async () => {
+    const server = statefulMissingSchemaServer();
+    seedCompleteSchemaState(server);
+    const first = mockFetch(server.router);
+    const firstResult = await runSchemaTool({
+      argv: requiredArgs(['--apply', '--test-suffix', TEST_SUFFIX]),
+      fetchImpl: first.fetchImpl,
+      env: credentialEnv(),
+      now: () => NOW
+    });
+    const firstMutationPosts = first.calls.filter((call) =>
+      call.method === 'POST' &&
+      call.url.pathname !== '/contacts/search' &&
+      !call.url.pathname.endsWith('/records/search')
+    );
+    const contactPosts = firstMutationPosts.filter((call) =>
+      call.url.pathname === '/contacts/'
+    );
+    const opportunityPosts = firstMutationPosts.filter((call) =>
+      call.url.pathname === '/opportunities/'
+    );
+
+    expect(firstResult.exitCode).toBe(0);
+    expect(firstResult.receipt.verdict).toBe('APPLIED');
+    expect(firstResult.receipt.actions).toHaveLength(68);
+    expect(firstResult.receipt.summary).toMatchObject({
+      existing: 68,
+      plannedCreates: 0,
+      acceptedCreates: 7,
+      completedCreates: 7,
+      collisions: 0
+    });
+    expect(firstMutationPosts).toHaveLength(7);
+    expect(contactPosts).toHaveLength(2);
+    for (const contactPost of contactPosts) {
+      expect(contactPost.body.name).toMatch(/^RR TEST /);
+      expect(contactPost.body.dnd).toBe(true);
+      expect(contactPost.body).not.toHaveProperty('email');
+      expect(contactPost.body).not.toHaveProperty('phone');
+      expect(contactPost.body.customFields.length).toBeGreaterThan(0);
+      for (const customField of contactPost.body.customFields) {
+        expect(Object.keys(customField).sort()).toEqual(['fieldValue', 'id']);
+        expect(customField).not.toHaveProperty('value');
+        expect(customField).not.toHaveProperty('field_value');
+      }
+    }
+    expect(opportunityPosts).toHaveLength(2);
+    for (const opportunityPost of opportunityPosts) {
+      expect(opportunityPost.body.customFields.length).toBeGreaterThan(0);
+      for (const customField of opportunityPost.body.customFields) {
+        expect(Object.keys(customField).sort()).toEqual(['fieldValue', 'id']);
+        expect(customField).not.toHaveProperty('value');
+        expect(customField).not.toHaveProperty('field_value');
+      }
+    }
+    expect(server.state.contacts).toHaveLength(2);
+    expect(server.state.writeLog).toHaveLength(7);
+
+    const replay = mockFetch(server.router);
+    const replayResult = await runSchemaTool({
+      argv: requiredArgs(['--apply', '--test-suffix', TEST_SUFFIX]),
+      fetchImpl: replay.fetchImpl,
+      env: credentialEnv(),
+      now: () => new Date('2035-06-07T08:09:10.000Z')
+    });
+    const replayMutations = replay.calls.filter((call) =>
+      call.method === 'POST' &&
+      call.url.pathname !== '/contacts/search' &&
+      !call.url.pathname.endsWith('/records/search')
+    );
+    expect(replayResult.exitCode).toBe(0);
+    expect(replayResult.receipt.verdict).toBe('APPLIED');
+    expect(replayResult.receipt.summary.existing).toBe(68);
+    expect(replayResult.receipt.acceptedCreates).toEqual([]);
+    expect(replayResult.receipt.completed).toEqual([]);
+    expect(replayMutations).toEqual([]);
+    expect(server.state.writeLog).toHaveLength(7);
   });
 
   test('ignores a wrapped relation create body while retaining other wrapper compatibility', async () => {
@@ -2647,6 +2920,10 @@ describe('RestoreRadar guarded CRM schema apply tool', () => {
         id: contactFieldIds['RR | Environment'],
         fieldValue: 'TEST'
       });
+      expect(contact.customFields.every((field: any) =>
+        JSON.stringify(Object.keys(field).sort()) === JSON.stringify(['fieldValue', 'id'])
+      )).toBe(true);
+      expect(JSON.stringify(contact.customFields)).not.toMatch(/"value"|field_value/);
     }
     expect(business.properties.rr_environment).toBe('test');
     expect(business.properties).not.toHaveProperty('email');
@@ -2658,6 +2935,10 @@ describe('RestoreRadar guarded CRM schema apply tool', () => {
         id: opportunityFieldIds['RR | Environment'],
         fieldValue: 'TEST'
       });
+      expect(opportunity.customFields.every((field: any) =>
+        JSON.stringify(Object.keys(field).sort()) === JSON.stringify(['fieldValue', 'id'])
+      )).toBe(true);
+      expect(JSON.stringify(opportunity.customFields)).not.toMatch(/"value"|field_value/);
     }
     expect(assignment.properties.rr_environment).toBe('test');
     expect(assignment.properties.rr_assignment_state).toBe('queued');

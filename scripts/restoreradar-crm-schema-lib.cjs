@@ -7,6 +7,9 @@ const path = require('node:path');
 const OFFICIAL_BASE_URL = 'https://services.leadconnectorhq.com';
 const API_VERSION = 'v3';
 const DEFAULT_READBACK_RETRY_DELAYS_MS = Object.freeze([0, 250, 750, 1500]);
+const MAX_API_ERROR_BODY_CHARS = 16_384;
+const MAX_API_ERROR_MESSAGE_CHARS = 500;
+const MAX_API_ERROR_MESSAGES = 8;
 const DEFAULT_MANIFEST_PATH = path.resolve(
   __dirname,
   '../spec/restoreradar-crm-schema-v1.json'
@@ -69,10 +72,11 @@ class GuardError extends Error {
 }
 
 class ApiError extends GuardError {
-  constructor(status, method, endpoint) {
+  constructor(status, method, endpoint, apiResponse) {
     super('API_ERROR', `HighLevel returned HTTP ${status} for ${method} ${endpoint}`);
     this.name = 'ApiError';
     this.status = status;
+    this.apiResponse = apiResponse;
   }
 }
 
@@ -191,13 +195,109 @@ function sanitizePath(pathname) {
   return pathname.replace(/\?.*$/, '');
 }
 
+function collectSensitiveRequestValues(value, result = new Set(), seen = new Set()) {
+  if (typeof value === 'string') {
+    if (value.length) result.add(value);
+    return result;
+  }
+  if (typeof value === 'number' || typeof value === 'boolean' || typeof value === 'bigint') {
+    result.add(String(value));
+    return result;
+  }
+  if (!value || typeof value !== 'object' || seen.has(value)) return result;
+  seen.add(value);
+  for (const nested of Array.isArray(value) ? value : Object.values(value)) {
+    collectSensitiveRequestValues(nested, result, seen);
+  }
+  return result;
+}
+
+function redactDiagnosticText(value, sensitiveValues = []) {
+  let text = String(value);
+  const exactValues = [...new Set(sensitiveValues)]
+    .filter((entry) => typeof entry === 'string' && entry.length)
+    .sort((left, right) => right.length - left.length);
+  if (exactValues.length) {
+    const exactPattern = exactValues
+      .map((entry) => {
+        const escaped = entry.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        return /^[A-Za-z0-9_]+$/.test(entry)
+          ? `(?<![A-Za-z0-9_])${escaped}(?![A-Za-z0-9_])`
+          : escaped;
+      })
+      .join('|');
+    text = text.replace(new RegExp(exactPattern, 'g'), '[REDACTED]');
+  }
+  text = text
+    .replace(/Bearer\s+[A-Za-z0-9._~+\/-]+/gi, 'Bearer [REDACTED]')
+    .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, '[REDACTED_EMAIL]')
+    .replace(/\+?\d[\d().\s-]{6,}\d/g, '[REDACTED_PHONE]')
+    .replace(/[A-Za-z0-9_-]{32,}/g, '[REDACTED]')
+    .replace(/[\u0000-\u001F\u007F]/g, ' ')
+    .trim();
+  if (text.length > MAX_API_ERROR_MESSAGE_CHARS) {
+    return `${text.slice(0, MAX_API_ERROR_MESSAGE_CHARS - 3)}...`;
+  }
+  return text;
+}
+
+function sanitizeApiErrorResponse(payload, { token, requestBody } = {}) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null;
+  const sensitiveValues = [
+    token,
+    ...collectSensitiveRequestValues(requestBody)
+  ];
+  const sanitized = {};
+  if (
+    Number.isInteger(payload.statusCode) &&
+    payload.statusCode >= 100 &&
+    payload.statusCode <= 599
+  ) {
+    sanitized.statusCode = payload.statusCode;
+  }
+  if (typeof payload.error === 'string' && payload.error.trim()) {
+    sanitized.error = redactDiagnosticText(payload.error, sensitiveValues);
+  }
+  if (typeof payload.message === 'string' && payload.message.trim()) {
+    sanitized.message = redactDiagnosticText(payload.message, sensitiveValues);
+  } else if (Array.isArray(payload.message)) {
+    const messages = payload.message
+      .filter((message) => typeof message === 'string' && message.trim())
+      .slice(0, MAX_API_ERROR_MESSAGES)
+      .map((message) => redactDiagnosticText(message, sensitiveValues));
+    if (messages.length) sanitized.message = messages;
+  }
+  return Object.keys(sanitized).length ? sanitized : null;
+}
+
+async function readSanitizedApiErrorResponse(response, context) {
+  let text;
+  try {
+    text = await response.text();
+  } catch {
+    return null;
+  }
+  if (!text.trim() || text.length > MAX_API_ERROR_BODY_CHARS) return null;
+  try {
+    return sanitizeApiErrorResponse(JSON.parse(text), context);
+  } catch {
+    return null;
+  }
+}
+
 function sanitizeError(error) {
   const code = error instanceof GuardError ? error.code : 'UNEXPECTED_ERROR';
   let message = error instanceof Error ? error.message : String(error);
   message = message
     .replace(/Bearer\s+[A-Za-z0-9._~+\/-]+/gi, 'Bearer [REDACTED]')
     .replace(/[A-Za-z0-9_-]{40,}/g, '[REDACTED]');
-  return { code, message };
+  return {
+    code,
+    message,
+    ...(error instanceof ApiError && error.apiResponse
+      ? { apiResponse: error.apiResponse }
+      : {})
+  };
 }
 
 function defaultSleep(delayMs) {
@@ -349,7 +449,13 @@ class HighLevelClient {
 
     requestReceipt.status = response.status;
     requestReceipt.accepted2xx = response.ok;
-    if (!response.ok) throw new ApiError(response.status, method, pathname);
+    if (!response.ok) {
+      const apiResponse = await readSanitizedApiErrorResponse(response, {
+        token: this.token,
+        requestBody: body
+      });
+      throw new ApiError(response.status, method, pathname, apiResponse);
+    }
     if (mutating) {
       this.receipt.acceptedCreates.push({
         resource: receiptResource || 'unclassifiedCreate',
@@ -1443,6 +1549,25 @@ function assertTestContact(payload) {
   if ('email' in payload || 'phone' in payload) {
     throw new GuardError('TEST_RECORD_GUARD', 'TEST contact must not contain email or phone channels');
   }
+  const customFields = payload.customFields;
+  const customFieldIds = Array.isArray(customFields)
+    ? customFields.map((field) => field?.id)
+    : [];
+  if (
+    !Array.isArray(customFields) ||
+    !customFields.length ||
+    customFields.some((field) =>
+      !field?.id ||
+      !isNonEmptyValue(field.fieldValue) ||
+      !sameStringArray(Object.keys(field).sort(), ['fieldValue', 'id'])
+    ) ||
+    new Set(customFieldIds).size !== customFieldIds.length
+  ) {
+    throw new GuardError(
+      'TEST_RECORD_GUARD',
+      'TEST contact custom fields must be unique exact {id,fieldValue} request items'
+    );
+  }
 }
 
 async function searchContact(client, manifest, receipt, name) {
@@ -1478,18 +1603,38 @@ function sameValue(left, right) {
   return false;
 }
 
+const AMBIGUOUS_CUSTOM_FIELD_VALUE = Symbol('ambiguous-custom-field-value');
+const CUSTOM_FIELD_READBACK_KEYS = new Set(['id', 'value', 'fieldValue', 'field_value']);
+
 function customFieldValue(field) {
-  return field?.fieldValue ?? field?.field_value ?? field?.value;
+  const values = [field?.value, field?.fieldValue, field?.field_value]
+    .filter((value) => value !== undefined && value !== null);
+  if (!values.length) return undefined;
+  if (values.some((value) => !sameValue(value, values[0]))) {
+    return AMBIGUOUS_CUSTOM_FIELD_VALUE;
+  }
+  return values[0];
+}
+
+function hasUnexpectedCustomFieldData(field) {
+  if (!field || typeof field !== 'object' || Array.isArray(field)) {
+    return isNonEmptyValue(field);
+  }
+  return Object.entries(field).some(([key, value]) =>
+    !CUSTOM_FIELD_READBACK_KEYS.has(key) && isNonEmptyValue(value)
+  );
 }
 
 function customFieldValuesMatch(actualFields, expectedFields) {
   if (!Array.isArray(actualFields)) return false;
+  if (actualFields.some((field) => hasUnexpectedCustomFieldData(field))) return false;
   const actualNonEmpty = actualFields.filter((field) => isNonEmptyValue(customFieldValue(field)));
   if (actualNonEmpty.length !== expectedFields.length) return false;
   const seen = new Set();
   return expectedFields.every((expected) => {
+    const expectedValue = customFieldValue(expected);
     const matches = actualNonEmpty.filter((actual) =>
-      actual?.id === expected.id && sameValue(customFieldValue(actual), expected.fieldValue)
+      actual?.id === expected.id && sameValue(customFieldValue(actual), expectedValue)
     );
     if (matches.length !== 1 || seen.has(expected.id)) return false;
     seen.add(expected.id);
