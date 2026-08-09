@@ -13,6 +13,7 @@ const {
   customObjectV2NamespaceFromReadback,
   loadManifest,
   readBusinesses,
+  resolveContactFullName,
   runSchemaTool: runSchemaToolImpl,
   testIds,
   timestampFromTestSuffix
@@ -626,6 +627,7 @@ function completeRouter(call: FetchCall, overrides: {
 function statefulMissingSchemaServer(objectReadDelay = 0, options: {
   envelope?: 'flat' | 'wrapper';
   relationScenario?: RelationScenario;
+  contactFullNameConflict?: 'search' | 'direct';
   objectStandard?: 'missing' | 'null' | 'true';
   createdObjectKey?: string;
   customFolderReadDelay?: number;
@@ -804,7 +806,16 @@ function statefulMissingSchemaServer(objectReadDelay = 0, options: {
     }
     if (call.method === 'POST' && pathname === '/contacts/search') {
       return jsonResponse({
-        contacts: state.contacts.filter((contact: any) => contact.name === call.body.query)
+        contacts: state.contacts
+          .filter((contact: any) => contact.name === call.body.query)
+          .map((contact: any) => ({
+            id: contact.id,
+            firstName: contact.firstName,
+            lastName: contact.lastName,
+            contactName: options.contactFullNameConflict === 'search'
+              ? 'rr test conflicting contact'
+              : contact.name.toLowerCase()
+          }))
       });
     }
     if (call.method === 'POST' && pathname === '/contacts/') {
@@ -815,18 +826,19 @@ function statefulMissingSchemaServer(objectReadDelay = 0, options: {
     if (call.method === 'GET' && pathname.startsWith('/contacts/')) {
       const id = pathname.split('/').pop();
       const contact = state.contacts.find((entry: any) => entry.id === id);
-      return contact
-        ? jsonResponse({
-          contact: {
-            ...contact,
-            customFields: contact.customFields.map((field: any) =>
-              contact.name.includes('Provider')
-                ? { id: field.id, field_value: field.fieldValue }
-                : { id: field.id, value: field.fieldValue }
-            )
-          }
-        })
-        : jsonResponse({}, 404);
+      if (!contact) return jsonResponse({}, 404);
+      const directContact = { ...contact };
+      delete directContact.name;
+      delete directContact.contactName;
+      if (options.contactFullNameConflict === 'direct') {
+        directContact.contactName = 'rr test conflicting contact';
+      }
+      directContact.customFields = contact.customFields.map((field: any) =>
+        contact.name.includes('Provider')
+          ? { id: field.id, field_value: field.fieldValue }
+          : { id: field.id, value: field.fieldValue }
+      );
+      return jsonResponse({ contact: directContact });
     }
     if (call.method === 'GET' && pathname === '/businesses/') {
       return jsonResponse({
@@ -1073,6 +1085,27 @@ function seedCompleteSchemaState(
   state.customFolders = [fixture.customFolder];
   state.customFields = fixture.customFields;
   state.associations = [fixture.association];
+}
+
+function seedAcceptedLiveHomeownerContact(
+  server: ReturnType<typeof statefulMissingSchemaServer>
+) {
+  const fieldIds = Object.fromEntries(
+    server.state.legacyFields
+      .filter((field: any) => field.model === 'contact')
+      .map((field: any) => [field.name, field.id])
+  );
+  const payload = buildContactPayloads({
+    manifest: server.manifest,
+    suffix: TEST_SUFFIX,
+    fieldIds
+  }).homeowner;
+  const contact = {
+    ...payload,
+    id: 'contact_homeowner_live_accepted'
+  };
+  server.state.contacts.push(contact);
+  return contact;
 }
 
 describe('RestoreRadar guarded CRM schema apply tool', () => {
@@ -1933,7 +1966,7 @@ describe('RestoreRadar guarded CRM schema apply tool', () => {
     expect(receiptText).not.toContain(bodyEchoMarker);
   });
 
-  test('records the live no-channel 400/422 Contact rejection without accepting a create', async () => {
+  test('retains the controlled retry6 400/422 response fixture without accepting a mocked create', async () => {
     const server = statefulMissingSchemaServer();
     seedCompleteSchemaState(server);
     const liveMessage = 'Contacts without email, phone, firstName and lastName are not allowed.';
@@ -1968,8 +2001,8 @@ describe('RestoreRadar guarded CRM schema apply tool', () => {
     expect(contactPosts).toHaveLength(1);
     expect(contactPosts[0].body).toMatchObject({
       name: `RR TEST Homeowner ${TEST_SUFFIX}`,
-      firstName: 'RR TEST',
-      lastName: `Homeowner ${TEST_SUFFIX}`,
+      firstName: 'RR',
+      lastName: `TEST Homeowner ${TEST_SUFFIX}`,
       dnd: true
     });
     expect(contactPosts[0].body).not.toHaveProperty('email');
@@ -2472,7 +2505,98 @@ describe('RestoreRadar guarded CRM schema apply tool', () => {
     expect(server.state.writeLog).toHaveLength(75);
   });
 
-  test('a fully-existing 68-resource schema creates no-channel TEST contacts with the documented request shape, then replays with zero writes', async () => {
+  test.each(['search', 'direct'] as const)(
+    'halts before mutation when the live TEST contact %s name evidence conflicts',
+    async (contactFullNameConflict) => {
+      const server = statefulMissingSchemaServer(0, { contactFullNameConflict });
+      seedCompleteSchemaState(server);
+      seedAcceptedLiveHomeownerContact(server);
+      const { calls, fetchImpl } = mockFetch(server.router);
+      const result = await runSchemaTool({
+        argv: requiredArgs(['--apply', '--test-suffix', TEST_SUFFIX]),
+        fetchImpl,
+        env: credentialEnv(),
+        now: () => NOW
+      });
+
+      expect(result.exitCode).toBe(2);
+      expect(result.receipt.verdict).toBe('HALTED');
+      expect(result.receipt.haltReason.code).toBe('INCOMPATIBLE_COLLISION');
+      expect(calls.filter((call) =>
+        call.method === 'POST' &&
+        call.url.pathname !== '/contacts/search' &&
+        !call.url.pathname.endsWith('/records/search')
+      )).toEqual([]);
+      expect(server.state.writeLog).toEqual([]);
+    }
+  );
+
+  test('recovers the accepted live-shape homeowner without reposting it, completes the TEST graph, then replays with zero writes', async () => {
+    const server = statefulMissingSchemaServer();
+    seedCompleteSchemaState(server);
+    const acceptedHomeowner = seedAcceptedLiveHomeownerContact(server);
+    const first = mockFetch(server.router);
+    const firstResult = await runSchemaTool({
+      argv: requiredArgs(['--apply', '--test-suffix', TEST_SUFFIX]),
+      fetchImpl: first.fetchImpl,
+      env: credentialEnv(),
+      now: () => NOW
+    });
+    const firstMutationPosts = first.calls.filter((call) =>
+      call.method === 'POST' &&
+      call.url.pathname !== '/contacts/search' &&
+      !call.url.pathname.endsWith('/records/search')
+    );
+    const contactPosts = firstMutationPosts.filter((call) =>
+      call.url.pathname === '/contacts/'
+    );
+
+    expect(firstResult.exitCode).toBe(0);
+    expect(firstResult.receipt.verdict).toBe('APPLIED');
+    expect(firstResult.receipt.summary).toMatchObject({
+      existing: 68,
+      plannedCreates: 0,
+      acceptedCreates: 6,
+      completedCreates: 6,
+      collisions: 0
+    });
+    expect(contactPosts).toHaveLength(1);
+    expect(contactPosts[0].body).toMatchObject({
+      name: `RR TEST Provider Contact ${TEST_SUFFIX}`,
+      firstName: 'RR',
+      lastName: `TEST Provider Contact ${TEST_SUFFIX}`,
+      dnd: true
+    });
+    expect(contactPosts[0].body.name).not.toBe(acceptedHomeowner.name);
+    expect(contactPosts[0].body).not.toHaveProperty('email');
+    expect(contactPosts[0].body).not.toHaveProperty('phone');
+    expect(firstMutationPosts).toHaveLength(6);
+    expect(server.state.contacts).toHaveLength(2);
+    expect(server.state.writeLog).toHaveLength(6);
+    expect(first.calls.some((call) =>
+      call.method === 'GET' && call.url.pathname === `/contacts/${acceptedHomeowner.id}`
+    )).toBe(true);
+
+    const replay = mockFetch(server.router);
+    const replayResult = await runSchemaTool({
+      argv: requiredArgs(['--apply', '--test-suffix', TEST_SUFFIX]),
+      fetchImpl: replay.fetchImpl,
+      env: credentialEnv(),
+      now: () => new Date('2035-06-07T08:09:10.000Z')
+    });
+    expect(replayResult.exitCode).toBe(0);
+    expect(replayResult.receipt.verdict).toBe('APPLIED');
+    expect(replayResult.receipt.acceptedCreates).toEqual([]);
+    expect(replayResult.receipt.completed).toEqual([]);
+    expect(replay.calls.filter((call) =>
+      call.method === 'POST' &&
+      call.url.pathname !== '/contacts/search' &&
+      !call.url.pathname.endsWith('/records/search')
+    )).toEqual([]);
+    expect(server.state.writeLog).toHaveLength(6);
+  });
+
+  test('a fully-existing 68-resource schema creates live-shape no-channel TEST contacts with the exact request contract, then replays with zero writes', async () => {
     const server = statefulMissingSchemaServer();
     seedCompleteSchemaState(server);
     const first = mockFetch(server.router);
@@ -2513,13 +2637,13 @@ describe('RestoreRadar guarded CRM schema apply tool', () => {
     }))).toEqual([
       {
         name: `RR TEST Homeowner ${TEST_SUFFIX}`,
-        firstName: 'RR TEST',
-        lastName: `Homeowner ${TEST_SUFFIX}`
+        firstName: 'RR',
+        lastName: `TEST Homeowner ${TEST_SUFFIX}`
       },
       {
         name: `RR TEST Provider Contact ${TEST_SUFFIX}`,
-        firstName: 'RR TEST',
-        lastName: `Provider Contact ${TEST_SUFFIX}`
+        firstName: 'RR',
+        lastName: `TEST Provider Contact ${TEST_SUFFIX}`
       }
     ]);
     for (const contactPost of contactPosts) {
@@ -3015,9 +3139,9 @@ describe('RestoreRadar guarded CRM schema apply tool', () => {
       expect(contact).not.toHaveProperty('email');
       expect(contact).not.toHaveProperty('phone');
       expect(contact.name).toMatch(/^RR TEST /);
-      expect(contact.firstName).toBe('RR TEST');
+      expect(contact.firstName).toBe('RR');
       expect(contact.name).toBe(`${contact.firstName} ${contact.lastName}`);
-      expect(contact.lastName).toMatch(/^(Homeowner|Provider Contact) \d{8}T\d{6}Z$/);
+      expect(contact.lastName).toMatch(/^TEST (Homeowner|Provider Contact) \d{8}T\d{6}Z$/);
       expect(contact.customFields).toContainEqual({
         id: contactFieldIds['RR | Environment'],
         fieldValue: 'TEST'
@@ -3053,6 +3177,37 @@ describe('RestoreRadar guarded CRM schema apply tool', () => {
     expect(JSON.stringify({ contacts, business, opportunities, assignment })).not.toContain(TOKEN);
   });
 
+  test('resolves lowercase live search names and missing direct names while rejecting semantic conflicts', () => {
+    const fullName = `RR TEST Homeowner ${TEST_SUFFIX}`;
+    const splitName = {
+      firstName: 'RR',
+      lastName: `TEST Homeowner ${TEST_SUFFIX}`
+    };
+    const liveSearch = {
+      id: 'contact_homeowner_live',
+      ...splitName,
+      contactName: fullName.toLowerCase()
+    };
+    const liveDirect = {
+      id: 'contact_homeowner_live',
+      ...splitName
+    };
+
+    expect(liveSearch).not.toHaveProperty('name');
+    expect(liveDirect).not.toHaveProperty('name');
+    expect(liveDirect).not.toHaveProperty('contactName');
+    expect(resolveContactFullName(liveSearch)).toBe(fullName);
+    expect(resolveContactFullName({
+      ...liveSearch,
+      contactName: null
+    })).toBe(fullName);
+    expect(resolveContactFullName(liveDirect)).toBe(fullName);
+    expect(() => resolveContactFullName({
+      ...liveDirect,
+      contactName: 'rr test conflicting contact'
+    })).toThrow(expect.objectContaining({ code: 'INCOMPATIBLE_COLLISION' }));
+  });
+
   test('the independent TEST contact guard requires exact no-channel first and last names', () => {
     const fixture = completeFixture();
     const fieldIds = Object.fromEntries(
@@ -3070,8 +3225,8 @@ describe('RestoreRadar guarded CRM schema apply tool', () => {
     for (const mutate of [
       (candidate: any) => { delete candidate.firstName; },
       (candidate: any) => { delete candidate.lastName; },
-      (candidate: any) => { candidate.firstName = 'Homeowner'; },
-      (candidate: any) => { candidate.lastName = `Wrong ${TEST_SUFFIX}`; },
+      (candidate: any) => { candidate.firstName = 'RR TEST'; },
+      (candidate: any) => { candidate.lastName = `Homeowner ${TEST_SUFFIX}`; },
       (candidate: any) => { candidate.name = `RR TEST Mismatch ${TEST_SUFFIX}`; },
       (candidate: any) => { candidate.email = 'blocked@example.test'; },
       (candidate: any) => { candidate.phone = '+15125550199'; }
